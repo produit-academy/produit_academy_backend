@@ -19,10 +19,42 @@ from .serializers import (
     MyTokenObtainPairSerializer, BranchSerializer, ChangePasswordSerializer,
     ResetPasswordSerializer, UserProfileSerializer
 )
+# Make sure Session is imported from your models
 from .models import User, Branch, StudyMaterial, CourseRequest, Session
 
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
+
+    def post(self, request, *args, **kwargs):
+        # Run the default simple-jwt login logic first
+        response = super().post(request, *args, **kwargs)
+
+        # If the login was successful (HTTP 200 OK)
+        if response.status_code == status.HTTP_200_OK:
+            # Get the serializer instance
+            serializer = self.get_serializer(data=request.data)
+            
+            try:
+                # We must re-validate to get the 'user' object attached
+                serializer.is_valid(raise_exception=True)
+                user = serializer.user
+                
+                # --- THIS IS THE LOGIC MOVED FROM THE SERIALIZER ---
+                # Now, run the single-session logic
+                Session.objects.filter(user=user).delete()
+                # Get the access token from the successful response data
+                session_key = response.data.get('access')
+                if session_key:
+                    Session.objects.create(user=user, session_key=str(session_key))
+                    print(f"--- New session created for {user.email} ---")
+                    
+            except AuthenticationFailed:
+                # This would be handled by super().post() anyway,
+                # but good to have in case of validation failure.
+                pass 
+        
+        # Return the original response (with tokens)
+        return response
 
 class SignUpView(generics.CreateAPIView):
     queryset = User.objects.all()
@@ -124,7 +156,7 @@ class PasswordResetRequestOTPView(APIView):
             print(f"--- Password Reset OTP {otp} sent to {user.email} ---")
             return Response({'detail': 'OTP has been sent to your email.'})
         except User.DoesNotExist:
-            return Response({'detail': 'User with this email does not exist.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'detail': 'User with this email does not exist.'}, status=status.HTTP_4404_NOT_FOUND)
 
 class PasswordResetConfirmView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -188,7 +220,7 @@ class CourseRequestUpdateView(generics.UpdateAPIView):
             instance.status = new_status
             instance.save()
             return Response(self.get_serializer(instance).data)
-        return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Invalid status'}, status=status.HTTP_4400_BAD_REQUEST)
 
 class BranchListView(generics.ListAPIView):
     queryset = Branch.objects.all()

@@ -27,12 +27,7 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
                 'no_active_account'
             )
 
-        # If the user is active, proceed with the single-session logic
-        Session.objects.filter(user=user).delete()
-        session_key = data.get('access')
-        if session_key:
-            Session.objects.create(user=user, session_key=str(session_key))
-            print(f"--- New session created for {user.email} ---")
+        # --- Session logic removed from here ---
 
         return data
 

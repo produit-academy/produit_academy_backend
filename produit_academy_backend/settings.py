@@ -4,6 +4,8 @@ import dj_database_url
 from dotenv import load_dotenv
 from datetime import timedelta
 
+load_dotenv()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
@@ -25,14 +27,6 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware', 'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_TRUSTED_ORIGINS = [
-    "https://produit-academy-frontend.vercel.app",
-]
-
-CSRF_TRUSTED_ORIGINS = [
-    "https://produit-academy-frontend.vercel.app",
-]
-
 CORS_ALLOWED_ORIGINS = [
     "https://produit-academy-frontend.vercel.app",
     "http://localhost:3000",
@@ -46,7 +40,12 @@ TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates', 'DIR
 
 WSGI_APPLICATION = 'produit_academy_backend.wsgi.application'
 
-DATABASES = {'default': dj_database_url.config(default=os.environ.get('DATABASE_URL'), conn_max_age=600)}
+DATABASES = {
+    'default': dj_database_url.config(
+        default=os.getenv('DATABASE_URL'),
+        conn_max_age=600
+    )
+}
 
 AUTH_USER_MODEL = 'api.User'
 AUTHENTICATION_BACKENDS = ['api.authentication.EmailBackend', 'django.contrib.auth.backends.ModelBackend']

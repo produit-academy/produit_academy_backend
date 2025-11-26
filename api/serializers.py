@@ -1,60 +1,41 @@
-# api/serializers.py
 from rest_framework import serializers
-from .models import User, Branch, StudyMaterial, CourseRequest, Session
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework.exceptions import AuthenticationFailed # Add this import
+from rest_framework.exceptions import AuthenticationFailed
+from .models import (
+    User, Branch, StudyMaterial, CourseRequest, Session, 
+    Quiz, Question, Choice, QuizSubmission
+)
+
+# --- AUTHENTICATION SERIALIZERS ---
 
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
         token['username'] = user.username
-        token['is_staff'] = user.is_staff
         token['role'] = user.role
         return token
 
     def validate(self, attrs):
-        # This will authenticate the user, or raise an exception
         data = super().validate(attrs)
-
-        # `self.user` is the user object that was successfully authenticated
         user = self.user
-
-        # Add a custom check to see if the user's account is active
         if not user.is_active:
-            raise AuthenticationFailed(
-                'Account is inactive. Please verify your email to activate it.',
-                'no_active_account'
-            )
-
-        # --- Session logic removed from here ---
-
+            raise AuthenticationFailed('Account is inactive. Please verify your email.')
         return data
 
-
 class UserSerializer(serializers.ModelSerializer):
-    branch = serializers.IntegerField(write_only=True, required=False)
-
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), required=False, allow_null=True)
+    
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch')
+        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'college', 'phone_number')
         extra_kwargs = {'password': {'write_only': True}}
 
     def create(self, validated_data):
-        validated_data.pop('branch', None)
         user = User.objects.create_user(**validated_data)
-        user.is_active = False 
+        user.is_active = False # Require OTP verification
         user.save()
         return user
-
-class BranchSerializer(serializers.ModelSerializer):
-    class Meta: model = Branch; fields = '__all__'
-class StudyMaterialSerializer(serializers.ModelSerializer):
-    class Meta: model = StudyMaterial; fields = '__all__'
-class CourseRequestSerializer(serializers.ModelSerializer):
-    student = UserSerializer(read_only=True)
-    branch = BranchSerializer(read_only=True)
-    class Meta: model = CourseRequest; fields = '__all__'
 
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=True)
@@ -79,3 +60,76 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = ('username', 'email', 'college', 'phone_number')
         read_only_fields = ('email',)
+
+# --- CORE MODELS SERIALIZERS ---
+
+class BranchSerializer(serializers.ModelSerializer):
+    class Meta: model = Branch; fields = '__all__'
+
+class StudyMaterialSerializer(serializers.ModelSerializer):
+    class Meta: model = StudyMaterial; fields = '__all__'
+
+class CourseRequestSerializer(serializers.ModelSerializer):
+    student = UserSerializer(read_only=True)
+    branch = BranchSerializer(read_only=True)
+    class Meta: model = CourseRequest; fields = '__all__'
+
+# --- QUIZ & EXAM SERIALIZERS ---
+
+# 1. Student View (Taking the Quiz) - HIDES Correct Answers
+class ChoiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Choice
+        fields = ['id', 'text'] # Excludes 'is_correct'
+
+class QuestionSerializer(serializers.ModelSerializer):
+    choices = ChoiceSerializer(many=True)
+    class Meta:
+        model = Question
+        fields = ['id', 'text', 'marks', 'choices']
+
+class QuizSerializer(serializers.ModelSerializer):
+    questions = QuestionSerializer(many=True)
+    class Meta:
+        model = Quiz
+        fields = ['id', 'title', 'duration_minutes', 'total_marks', 'questions']
+
+# 2. Admin View (Creating Quiz) - Includes Write Logic
+class ChoiceWriteSerializer(serializers.ModelSerializer):
+    class Meta: model = Choice; fields = ['text', 'is_correct']
+
+class QuestionWriteSerializer(serializers.ModelSerializer):
+    choices = ChoiceWriteSerializer(many=True)
+    class Meta: model = Question; fields = ['text', 'marks', 'choices']
+
+class QuizCreateSerializer(serializers.ModelSerializer):
+    questions = QuestionWriteSerializer(many=True)
+    class Meta:
+        model = Quiz
+        fields = ['title', 'branch', 'duration_minutes', 'total_marks', 'questions']
+
+    def create(self, validated_data):
+        questions_data = validated_data.pop('questions')
+        quiz = Quiz.objects.create(**validated_data)
+        for q_data in questions_data:
+            choices_data = q_data.pop('choices')
+            question = Question.objects.create(quiz=quiz, **q_data)
+            for c_data in choices_data:
+                Choice.objects.create(question=question, **c_data)
+        return quiz
+
+# 3. Analytics View (Viewing Results) - SHOWS Correct Answers
+class ChoiceDetailSerializer(serializers.ModelSerializer):
+    class Meta: model = Choice; fields = ['id', 'text', 'is_correct']
+
+class QuestionResultSerializer(serializers.ModelSerializer):
+    choices = ChoiceDetailSerializer(many=True)
+    class Meta: model = Question; fields = ['id', 'text', 'marks', 'choices']
+
+class QuizResultSerializer(serializers.ModelSerializer):
+    questions = QuestionResultSerializer(many=True)
+    class Meta: model = Quiz; fields = ['id', 'title', 'total_marks', 'questions']
+
+class QuizSubmissionDetailSerializer(serializers.ModelSerializer):
+    quiz = QuizResultSerializer()
+    class Meta: model = QuizSubmission; fields = '__all__'

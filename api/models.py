@@ -46,3 +46,31 @@ class Session(models.Model):
 
     def __str__(self):
         return f"{self.user.username}'s session"
+
+class Quiz(models.Model):
+    title = models.CharField(max_length=200)
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name='quizzes')
+    duration_minutes = models.IntegerField(default=180) # 3 Hours for GATE
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self): return self.title
+
+class Question(models.Model):
+    quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='questions')
+    text = models.TextField()
+    marks = models.IntegerField(default=1)
+
+    def __str__(self): return str(self.text)[:50]
+
+class Choice(models.Model):
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='choices')
+    text = models.CharField(max_length=200)
+    is_correct = models.BooleanField(default=False)
+
+    def __str__(self): return self.text
+
+class QuizSubmission(models.Model):
+    student = models.ForeignKey(User, on_delete=models.CASCADE)
+    quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE)
+    score = models.FloatField()
+    submitted_at = models.DateTimeField(auto_now_add=True)

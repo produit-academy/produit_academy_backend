@@ -35,11 +35,13 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 serializer.is_valid(raise_exception=True)
                 user = serializer.user
                 
-                # Single Session Enforcement
-                Session.objects.filter(user=user).delete() # Remove old sessions
+                Session.objects.filter(user=user).delete()
                 session_key = response.data.get('access')
                 if session_key:
                     Session.objects.create(user=user, session_key=str(session_key))
+                
+                response.data['role'] = user.role 
+
             except Exception as e:
                 pass
         return response
@@ -274,3 +276,40 @@ class StudentResultDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = QuizSubmissionDetailSerializer
     queryset = QuizSubmission.objects.all()
+
+class AdminQuizListView(generics.ListAPIView):
+    """List all quizzes for the Admin Dashboard"""
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = QuizSerializer
+    queryset = Quiz.objects.all().order_by('-created_at')
+
+class AdminQuizDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Edit or Delete a specific quiz"""
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = QuizCreateSerializer
+    queryset = Quiz.objects.all()
+
+class AdminGlobalAnalyticsView(generics.ListAPIView):
+    """View all student submissions for the Admin"""
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = QuizSubmissionDetailSerializer
+    queryset = QuizSubmission.objects.all().order_by('-submitted_at')
+
+class StudentQuizListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = QuizSerializer
+
+    def get_queryset(self):
+        # Only show quizzes relevant to the student's branch
+        user = self.request.user
+        if user.branch:
+            return Quiz.objects.filter(branch=user.branch)
+        return Quiz.objects.none()
+    
+class AdminStudentHistoryView(generics.ListAPIView):
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = QuizSubmissionDetailSerializer
+
+    def get_queryset(self):
+        student_id = self.kwargs['pk']
+        return QuizSubmission.objects.filter(student_id=student_id).order_by('-submitted_at')

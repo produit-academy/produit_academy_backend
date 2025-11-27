@@ -25,15 +25,16 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), required=False, allow_null=True)
-    
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'college', 'phone_number')
+        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'branch_name', 'college', 'phone_number')
         extra_kwargs = {'password': {'write_only': True}}
 
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
-        user.is_active = False # Require OTP verification
+        user.is_active = False 
         user.save()
         return user
 
@@ -104,6 +105,7 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
 
 class QuizCreateSerializer(serializers.ModelSerializer):
     questions = QuestionWriteSerializer(many=True)
+    
     class Meta:
         model = Quiz
         fields = ['title', 'branch', 'duration_minutes', 'total_marks', 'questions']
@@ -117,6 +119,29 @@ class QuizCreateSerializer(serializers.ModelSerializer):
             for c_data in choices_data:
                 Choice.objects.create(question=question, **c_data)
         return quiz
+
+    def update(self, instance, validated_data):
+        # 1. Update Quiz Fields
+        instance.title = validated_data.get('title', instance.title)
+        instance.branch = validated_data.get('branch', instance.branch)
+        instance.duration_minutes = validated_data.get('duration_minutes', instance.duration_minutes)
+        instance.total_marks = validated_data.get('total_marks', instance.total_marks)
+        instance.save()
+
+        # 2. Handle Nested Questions
+        # Strategy: Clear existing questions and re-create them (Simplest for MVP consistency)
+        # Warning: This resets question IDs. 
+        if 'questions' in validated_data:
+            questions_data = validated_data.pop('questions')
+            instance.questions.all().delete() # Delete old questions
+            
+            for q_data in questions_data:
+                choices_data = q_data.pop('choices')
+                question = Question.objects.create(quiz=instance, **q_data)
+                for c_data in choices_data:
+                    Choice.objects.create(question=question, **c_data)
+        
+        return instance
 
 # 3. Analytics View (Viewing Results) - SHOWS Correct Answers
 class ChoiceDetailSerializer(serializers.ModelSerializer):

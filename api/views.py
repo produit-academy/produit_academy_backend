@@ -46,7 +46,6 @@ class MyTokenObtainPairView(TokenObtainPairView):
                     response.data['role'] = 'admin'
                 else:
                     response.data['role'] = user.role 
-
             except Exception as e:
                 pass
         return response
@@ -112,13 +111,17 @@ class ResendOTPView(APIView):
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
-            send_mail(
-                'New OTP', 
-                f'Your new OTP is: {otp}', 
-                f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
-                [user.email]
-            )
-            return Response({'detail': 'OTP resent successfully'})
+            try:
+                send_mail(
+                    'New OTP', 
+                    f'Your new OTP is: {otp}', 
+                    f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
+                    [user.email]
+                )
+                return Response({'detail': 'OTP resent successfully'})
+            except Exception as e:
+                print(f"Email Error: {e}")
+                return Response({'detail': 'Failed to send email'}, status=500)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
 
@@ -138,13 +141,17 @@ class PasswordResetRequestOTPView(APIView):
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
-            send_mail(
-                'Reset Password OTP', 
-                f'Your OTP is: {otp}', 
-                f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
-                [user.email]
-            )
-            return Response({'detail': 'OTP sent'})
+            try:
+                send_mail(
+                    'Reset Password OTP', 
+                    f'Your OTP is: {otp}', 
+                    f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
+                    [user.email]
+                )
+                return Response({'detail': 'OTP sent'})
+            except Exception as e:
+                print(f"Email Error: {e}")
+                return Response({'detail': 'Failed to send email'}, status=500)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
 

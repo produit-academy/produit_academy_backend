@@ -70,7 +70,7 @@ DATABASES = {
 AUTH_USER_MODEL = 'api.User'
 
 # CORS & CSRF
-cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000')
+cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,https://produit-academy-frontend.vercel.app')
 
 if cors_env == '*':
     CORS_ALLOW_ALL_ORIGINS = True

@@ -35,12 +35,17 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 serializer.is_valid(raise_exception=True)
                 user = serializer.user
                 
-                Session.objects.filter(user=user).delete()
+                if user.role == 'student':
+                    Session.objects.filter(user=user).delete()
+                
                 session_key = response.data.get('access')
                 if session_key:
                     Session.objects.create(user=user, session_key=str(session_key))
                 
-                response.data['role'] = user.role 
+                if user.is_superuser or user.is_staff:
+                    response.data['role'] = 'admin'
+                else:
+                    response.data['role'] = user.role 
 
             except Exception as e:
                 pass
@@ -62,16 +67,18 @@ class SignUpView(generics.CreateAPIView):
         user.otp_expiry = timezone.now() + timedelta(minutes=10)
         user.save()
 
-        # Auto-create Course Request if branch selected
+        # PRACTICAL USE FIX: Always create a Pending request if branch exists
         if user.branch:
-            CourseRequest.objects.create(student=user, branch=user.branch, status='Pending')
+            # Check if request already exists to avoid duplicates
+            if not CourseRequest.objects.filter(student=user, branch=user.branch).exists():
+                CourseRequest.objects.create(student=user, branch=user.branch, status='Pending')
 
         # Send Email
         try:
             send_mail(
                 'Verify your Email - Produit Academy',
                 f'Welcome {user.username}!\nYour OTP is: {otp}\nIt expires in 10 minutes.',
-                settings.EMAIL_HOST_USER,
+                f'Produit Academy <{settings.EMAIL_HOST_USER}>',
                 [user.email],
                 fail_silently=False,
             )
@@ -105,7 +112,12 @@ class ResendOTPView(APIView):
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
-            send_mail('New OTP', f'Your new OTP is: {otp}', settings.EMAIL_HOST_USER, [user.email])
+            send_mail(
+                'New OTP', 
+                f'Your new OTP is: {otp}', 
+                f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
+                [user.email]
+            )
             return Response({'detail': 'OTP resent successfully'})
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
@@ -126,7 +138,12 @@ class PasswordResetRequestOTPView(APIView):
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
-            send_mail('Reset Password OTP', f'Your OTP is: {otp}', settings.EMAIL_HOST_USER, [user.email])
+            send_mail(
+                'Reset Password OTP', 
+                f'Your OTP is: {otp}', 
+                f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
+                [user.email]
+            )
             return Response({'detail': 'OTP sent'})
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
@@ -243,6 +260,21 @@ class StudentQuizDetailView(generics.RetrieveAPIView):
     serializer_class = QuizSerializer
     queryset = Quiz.objects.all()
 
+    def get_object(self):
+        obj = super().get_object()
+        user = self.request.user
+        
+        has_approval = CourseRequest.objects.filter(
+            student=user, 
+            branch=user.branch, 
+            status='Approved'
+        ).exists()
+
+        if not has_approval or obj.branch != user.branch:
+            raise Http404("You do not have access to this quiz.")
+        
+        return obj
+
 class QuizSubmitView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -300,10 +332,12 @@ class StudentQuizListView(generics.ListAPIView):
     serializer_class = QuizSerializer
 
     def get_queryset(self):
-        # Only show quizzes relevant to the student's branch
         user = self.request.user
-        if user.branch:
+        
+        if user.branch and CourseRequest.objects.filter(student=user, branch=user.branch, status='Approved').exists():
             return Quiz.objects.filter(branch=user.branch)
+        
+        # If not approved, return nothing
         return Quiz.objects.none()
     
 class AdminStudentHistoryView(generics.ListAPIView):

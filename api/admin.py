@@ -4,7 +4,7 @@ from .models import User, Branch, StudyMaterial, CourseRequest, Session, Quiz, Q
 # --- Inline Classes (Allows adding Questions inside Quiz view) ---
 class ChoiceInline(admin.TabularInline):
     model = Choice
-    extra = 4 # Shows 4 option slots by default
+    extra = 4
 
 class QuestionInline(admin.StackedInline):
     model = Question

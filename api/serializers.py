@@ -13,7 +13,10 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     def get_token(cls, user):
         token = super().get_token(user)
         token['username'] = user.username
-        token['role'] = user.role
+        if user.is_superuser or user.is_staff:
+            token['role'] = 'admin'
+        else:
+            token['role'] = user.role
         return token
 
     def validate(self, attrs):

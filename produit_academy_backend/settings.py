@@ -8,9 +8,11 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get('SECRET_KEY', 'unsafe-secret-key')
-DEBUG = os.environ.get('DEBUG', 'True') == 'True'
+# --- SECURITY CONFIGURATION ---
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dev-key')
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
+# Allow hosts from Render
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
 
 INSTALLED_APPS = [
@@ -20,9 +22,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # Third Party
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
+    # Local
     'api',
 ]
 
@@ -58,7 +62,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'produit_academy_backend.wsgi.application'
 
-# Database (Neon)
+# --- DATABASE (NEON / RENDER) ---
 DATABASES = {
     'default': dj_database_url.config(
         default=os.environ.get('DATABASE_URL'),
@@ -69,22 +73,21 @@ DATABASES = {
 
 AUTH_USER_MODEL = 'api.User'
 
-# CORS & CSRF
-cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,https://produit-academy-frontend.vercel.app')
+# --- CORS & CSRF ---
+cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', '*')
 
 if cors_env == '*':
     CORS_ALLOW_ALL_ORIGINS = True
-    CORS_ALLOWED_ORIGINS = []
-    CSRF_TRUSTED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000', 'https://produit-academy-frontend.vercel.app']
+    CSRF_TRUSTED_ORIGINS = ['https://produit-academy-frontend.vercel.app']
 else:
     CORS_ALLOW_ALL_ORIGINS = False
     CORS_ALLOWED_ORIGINS = cors_env.split(',')
     CSRF_TRUSTED_ORIGINS = cors_env.split(',')
 
-# REST Framework
+# --- REST FRAMEWORK ---
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'api.authentication.SessionEnforcedJWTAuthentication',
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
@@ -101,16 +104,16 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
 }
 
-# Email
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
-EMAIL_USE_SSL = os.environ.get('EMAIL_USE_SSL', 'False') == 'True'
+# --- EMAIL SETTINGS ---
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_HOST_USER = os.environ.get('EMAIL_USER')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_PASS')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 465))
+EMAIL_USE_SSL = os.environ.get('EMAIL_USE_SSL', 'True') == 'True'
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'False') == 'True'
 
-# Static & Media
+# --- STATIC & MEDIA ---
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'

@@ -69,10 +69,17 @@ DATABASES = {
 
 AUTH_USER_MODEL = 'api.User'
 
-# CORS
-CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
-CSRF_TRUSTED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
+# CORS & CSRF
+cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000')
+
+if cors_env == '*':
+    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = []
+    CSRF_TRUSTED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000']
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = cors_env.split(',')
+    CSRF_TRUSTED_ORIGINS = cors_env.split(',')
 
 # REST Framework
 REST_FRAMEWORK = {

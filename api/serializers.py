@@ -17,6 +17,10 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
             token['role'] = 'admin'
         else:
             token['role'] = user.role
+        
+        # Check if profile is complete (college and phone_number are required)
+        token['profile_complete'] = bool(user.college and user.phone_number)
+        
         return token
 
     def validate(self, attrs):

@@ -9,7 +9,7 @@ from rest_framework import generics, permissions, status, parsers, views
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
@@ -35,6 +35,7 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 serializer.is_valid(raise_exception=True)
                 user = serializer.user
                 
+                # Single Session Enforcement (Students Only)
                 if user.role == 'student':
                     Session.objects.filter(user=user).delete()
                 
@@ -42,6 +43,7 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 if session_key:
                     Session.objects.create(user=user, session_key=str(session_key))
                 
+                # Send role to frontend for redirection
                 if user.is_superuser or user.is_staff:
                     response.data['role'] = 'admin'
                 else:
@@ -66,9 +68,8 @@ class SignUpView(generics.CreateAPIView):
         user.otp_expiry = timezone.now() + timedelta(minutes=10)
         user.save()
 
-        # PRACTICAL USE FIX: Always create a Pending request if branch exists
+        # Auto-create Course Request if branch selected
         if user.branch:
-            # Check if request already exists to avoid duplicates
             if not CourseRequest.objects.filter(student=user, branch=user.branch).exists():
                 CourseRequest.objects.create(student=user, branch=user.branch, status='Pending')
 
@@ -77,7 +78,7 @@ class SignUpView(generics.CreateAPIView):
             send_mail(
                 'Verify your Email - Produit Academy',
                 f'Welcome {user.username}!\nYour OTP is: {otp}\nIt expires in 10 minutes.',
-                f'Produit Academy <{settings.EMAIL_HOST_USER}>',
+                settings.DEFAULT_FROM_EMAIL,
                 [user.email],
                 fail_silently=False,
             )
@@ -115,12 +116,11 @@ class ResendOTPView(APIView):
                 send_mail(
                     'New OTP', 
                     f'Your new OTP is: {otp}', 
-                    f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
+                    settings.DEFAULT_FROM_EMAIL, 
                     [user.email]
                 )
                 return Response({'detail': 'OTP resent successfully'})
             except Exception as e:
-                print(f"Email Error: {e}")
                 return Response({'detail': 'Failed to send email'}, status=500)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
@@ -145,12 +145,11 @@ class PasswordResetRequestOTPView(APIView):
                 send_mail(
                     'Reset Password OTP', 
                     f'Your OTP is: {otp}', 
-                    f'Produit Academy <{settings.EMAIL_HOST_USER}>', 
+                    settings.DEFAULT_FROM_EMAIL, 
                     [user.email]
                 )
                 return Response({'detail': 'OTP sent'})
             except Exception as e:
-                print(f"Email Error: {e}")
                 return Response({'detail': 'Failed to send email'}, status=500)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
@@ -206,7 +205,7 @@ class StudentManageView(generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
     def perform_destroy(self, instance):
-        instance.is_active = False # Soft delete
+        instance.is_active = False
         instance.save()
 
 # --- COURSE & MATERIALS ---
@@ -229,13 +228,20 @@ class StudyMaterialView(generics.ListAPIView):
     serializer_class = StudyMaterialSerializer
     def get_queryset(self):
         user = self.request.user
-        try:
-            req = CourseRequest.objects.filter(student=user).latest('id')
-            if req.status == 'Approved':
-                return StudyMaterial.objects.filter(branch=req.branch)
-            return StudyMaterial.objects.filter(branch=req.branch, is_preview=True)
-        except CourseRequest.DoesNotExist:
+        
+        if not user.branch:
             return StudyMaterial.objects.none()
+
+        is_approved = CourseRequest.objects.filter(
+            student=user, 
+            branch=user.branch, 
+            status='Approved'
+        ).exists()
+
+        if is_approved:
+            return StudyMaterial.objects.filter(branch=user.branch)
+        else:
+            return StudyMaterial.objects.filter(branch=user.branch, is_preview=True)
 
 class StudyMaterialUploadView(generics.CreateAPIView):
     permission_classes = [permissions.IsAdminUser]
@@ -244,12 +250,11 @@ class StudyMaterialUploadView(generics.CreateAPIView):
     serializer_class = StudyMaterialSerializer
 
 class MaterialFileView(APIView):
-    permission_classes = [permissions.AllowAny] # Controlled via signed URLs ideally, but open for MVP
+    permission_classes = [permissions.AllowAny] 
     def get(self, request, pk):
         try:
             material = StudyMaterial.objects.get(pk=pk)
             response = FileResponse(material.file.open(), content_type='application/pdf')
-            # 'inline' allows displaying in browser/React-PDF instead of downloading
             response['Content-Disposition'] = f'inline; filename="{material.file.name}"'
             return response
         except StudyMaterial.DoesNotExist:
@@ -261,6 +266,16 @@ class QuizCreateView(generics.CreateAPIView):
     permission_classes = [permissions.IsAdminUser]
     queryset = Quiz.objects.all()
     serializer_class = QuizCreateSerializer
+
+class StudentQuizListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = QuizSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.branch and CourseRequest.objects.filter(student=user, branch=user.branch, status='Approved').exists():
+            return Quiz.objects.filter(branch=user.branch)
+        return Quiz.objects.none()
 
 class StudentQuizDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -278,7 +293,7 @@ class StudentQuizDetailView(generics.RetrieveAPIView):
         ).exists()
 
         if not has_approval or obj.branch != user.branch:
-            raise Http404("You do not have access to this quiz.")
+            raise PermissionDenied("You do not have access to this quiz.")
         
         return obj
 
@@ -288,6 +303,16 @@ class QuizSubmitView(APIView):
     def post(self, request, pk):
         try:
             quiz = Quiz.objects.get(pk=pk)
+            user = request.user
+            has_approval = CourseRequest.objects.filter(
+                student=user, 
+                branch=user.branch, 
+                status='Approved'
+            ).exists()
+
+            if not has_approval or quiz.branch != user.branch:
+                return Response({'error': 'You do not have permission to submit this quiz.'}, status=403)
+
             answers = request.data.get('answers', [])
             score = 0.0
 
@@ -296,11 +321,10 @@ class QuizSubmitView(APIView):
                     choice = Choice.objects.get(id=ans['choice_id'], question_id=ans['question_id'])
                     if choice.is_correct:
                         score += choice.question.marks
-                    # Optional: Add negative marking logic here
                 except Choice.DoesNotExist:
                     continue
             
-            QuizSubmission.objects.create(student=request.user, quiz=quiz, score=score)
+            QuizSubmission.objects.create(student=user, quiz=quiz, score=score)
             return Response({'score': score, 'message': 'Quiz Submitted Successfully'})
         except Quiz.DoesNotExist:
             return Response({'error': 'Quiz not found'}, status=404)
@@ -317,36 +341,20 @@ class StudentResultDetailView(generics.RetrieveAPIView):
     queryset = QuizSubmission.objects.all()
 
 class AdminQuizListView(generics.ListAPIView):
-    """List all quizzes for the Admin Dashboard"""
     permission_classes = [permissions.IsAdminUser]
     serializer_class = QuizSerializer
     queryset = Quiz.objects.all().order_by('-created_at')
 
 class AdminQuizDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Edit or Delete a specific quiz"""
     permission_classes = [permissions.IsAdminUser]
     serializer_class = QuizCreateSerializer
     queryset = Quiz.objects.all()
 
 class AdminGlobalAnalyticsView(generics.ListAPIView):
-    """View all student submissions for the Admin"""
     permission_classes = [permissions.IsAdminUser]
     serializer_class = QuizSubmissionDetailSerializer
     queryset = QuizSubmission.objects.all().order_by('-submitted_at')
 
-class StudentQuizListView(generics.ListAPIView):
-    permission_classes = [permissions.IsAuthenticated]
-    serializer_class = QuizSerializer
-
-    def get_queryset(self):
-        user = self.request.user
-        
-        if user.branch and CourseRequest.objects.filter(student=user, branch=user.branch, status='Approved').exists():
-            return Quiz.objects.filter(branch=user.branch)
-        
-        # If not approved, return nothing
-        return Quiz.objects.none()
-    
 class AdminStudentHistoryView(generics.ListAPIView):
     permission_classes = [permissions.IsAdminUser]
     serializer_class = QuizSubmissionDetailSerializer

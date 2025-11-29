@@ -74,11 +74,11 @@ DATABASES = {
 AUTH_USER_MODEL = 'api.User'
 
 # --- CORS & CSRF ---
-cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', '*')
+cors_env = os.environ.get('CORS_ALLOWED_ORIGINS')
 
 if cors_env == '*':
     CORS_ALLOW_ALL_ORIGINS = True
-    CSRF_TRUSTED_ORIGINS = ['https://produit-academy-frontend.vercel.app']
+    CSRF_TRUSTED_ORIGINS = []
 else:
     CORS_ALLOW_ALL_ORIGINS = False
     CORS_ALLOWED_ORIGINS = cors_env.split(',')
@@ -105,13 +105,12 @@ SIMPLE_JWT = {
 }
 
 # --- EMAIL SETTINGS ---
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_HOST_USER = os.environ.get('EMAIL_USER')
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_PASS')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 465))
-EMAIL_USE_SSL = os.environ.get('EMAIL_USE_SSL', 'True') == 'True'
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'False') == 'True'
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND')
+ANYMAIL = {
+    "SENDINBLUE_API_KEY": os.environ.get('BREVO_API_KEY'),
+}
+DEFAULT_FROM_EMAIL = "Produit Academy <techproduit6@gmail.com>"
+SERVER_EMAIL = "techproduit6@gmail.com"
 
 # --- STATIC & MEDIA ---
 STATIC_URL = 'static/'

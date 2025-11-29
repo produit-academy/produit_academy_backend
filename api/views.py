@@ -2,6 +2,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
 from django.http import FileResponse, Http404
+from django.utils.html import strip_tags
 from datetime import timedelta
 import random
 
@@ -22,6 +23,114 @@ from .serializers import (
     QuizSubmissionDetailSerializer
 )
 
+# --- EMAIL HELPER FUNCTION ---
+
+def send_html_email(subject, recipient_email, username, otp, type='reset'):
+    """
+    Sends a professional HTML email with the Produit Academy logo.
+    type: 'reset' | 'signup' | 'resend'
+    """
+    
+    if type == 'reset':
+        title = "Password Reset Request"
+        intro = "We received a request to reset the password for your account."
+    elif type == 'signup':
+        title = "Welcome to Produit Academy!"
+        intro = "Thank you for signing up. Please verify your email address to get started."
+    else: # resend
+        title = "New OTP Request"
+        intro = "We received a request to resend your verification code."
+
+
+    logo_url = "https://produit-academy-frontend.vercel.app/logo.png"
+    
+    # Default message body for non-reset types
+    message_body = f"""
+                <p>Hi <strong>{username}</strong>,</p>
+                
+                <p>{intro}</p>
+                
+                <p>Your One-Time Password (OTP) is:</p>
+                
+                <div class="otp-box">{otp}</div>
+                
+                <p>This OTP will expire in 10 minutes for security reasons.</p>
+                
+                <p>If you did not request this, please ignore this email or contact support.</p>
+    """
+
+    # Specific message body for reset type as requested
+    if type == 'reset':
+        message_body = f"""
+                <p>Hi <strong>{username}</strong>,</p>
+
+                <p>We received a request to reset the password for your account.</p>
+
+                <p>Your One-Time Password (OTP) is:</p>
+
+                <div class="otp-box">{otp}</div>
+
+                <p>This OTP will expire in 10 minutes for security reasons.</p>
+
+                <p>If you did not request a password reset, please ignore this email or contact support.</p>
+        """
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }}
+            .container {{ max-width: 600px; margin: 20px auto; padding: 30px; border: 1px solid #eee; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .logo {{ max-width: 120px; height: auto; }}
+            .content {{ font-size: 16px; }}
+            .otp-box {{ 
+                background-color: #f0f7ff; 
+                border: 1px dashed #0070f3;
+                color: #0070f3;
+                padding: 20px; 
+                text-align: center; 
+                font-size: 32px; 
+                font-weight: bold; 
+                letter-spacing: 8px; 
+                margin: 25px 0; 
+                border-radius: 8px; 
+            }}
+            .footer {{ margin-top: 40px; font-size: 12px; color: #888; text-align: center; border-top: 1px solid #eee; padding-top: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <img src="{logo_url}" alt="Produit Academy" class="logo">
+            </div>
+            
+            <div class="content">
+                <h2 style="text-align: center; color: #111;">{title}</h2>
+                {message_body}
+                <br>
+                <p>Regards,<br><strong>Produit Academy Support Team</strong></p>
+            </div>
+            
+            <div class="footer">
+                &copy; {timezone.now().year} Produit Academy. All rights reserved.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    plain_message = strip_tags(html_content)
+    send_mail(
+        subject,
+        plain_message,
+        settings.DEFAULT_FROM_EMAIL,
+        [recipient_email],
+        html_message=html_content,
+        fail_silently=False,
+    )
+
 # --- AUTHENTICATION & SESSION MANAGEMENT ---
 
 class MyTokenObtainPairView(TokenObtainPairView):
@@ -35,9 +144,8 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 serializer.is_valid(raise_exception=True)
                 user = serializer.user
                 
-                # Single Session Enforcement (Students Only)
-                if user.role == 'student':
-                    Session.objects.filter(user=user).delete()
+                # Single Session Enforcement (All Users)
+                Session.objects.filter(user=user).delete()
                 
                 session_key = response.data.get('access')
                 if session_key:
@@ -75,12 +183,12 @@ class SignUpView(generics.CreateAPIView):
 
         # Send Email
         try:
-            send_mail(
-                'Verify your Email - Produit Academy',
-                f'Welcome {user.username}!\nYour OTP is: {otp}\nIt expires in 10 minutes.',
-                settings.DEFAULT_FROM_EMAIL,
-                [user.email],
-                fail_silently=False,
+            send_html_email(
+                'Welcome to Produit Academy - Verify Email',
+                user.email,
+                user.username,
+                otp,
+                type='signup'
             )
         except Exception as e:
             print(f"Email Error: {e}")
@@ -113,11 +221,12 @@ class ResendOTPView(APIView):
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
             try:
-                send_mail(
-                    'New OTP', 
-                    f'Your new OTP is: {otp}', 
-                    settings.DEFAULT_FROM_EMAIL, 
-                    [user.email]
+                send_html_email(
+                    'New Verification Code',
+                    user.email,
+                    user.username,
+                    otp,
+                    type='resend'
                 )
                 return Response({'detail': 'OTP resent successfully'})
             except Exception as e:
@@ -141,15 +250,18 @@ class PasswordResetRequestOTPView(APIView):
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
+            
             try:
-                send_mail(
-                    'Reset Password OTP', 
-                    f'Your OTP is: {otp}', 
-                    settings.DEFAULT_FROM_EMAIL, 
-                    [user.email]
+                send_html_email(
+                    'Password Reset Request',
+                    user.email,
+                    user.username,
+                    otp,
+                    type='reset'
                 )
                 return Response({'detail': 'OTP sent'})
             except Exception as e:
+                print(f"Email Error: {e}")
                 return Response({'detail': 'Failed to send email'}, status=500)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)

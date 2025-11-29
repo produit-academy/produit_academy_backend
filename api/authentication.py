@@ -2,8 +2,9 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from .models import Session
 
-class SessionEnforcedJWTAuthentication(JWTAuthentication):
+class SingleSessionJWTAuthentication(JWTAuthentication):
     def authenticate(self, request):
+        # Get the standard JWT authentication result
         header = self.get_header(request)
         if header is None:
             return None
@@ -13,14 +14,22 @@ class SessionEnforcedJWTAuthentication(JWTAuthentication):
             return None
 
         validated_token = self.get_validated_token(raw_token)
+        
+        # Standard user resolution
         user = self.get_user(validated_token)
-
-        if user.role == 'student':
-            # We use the raw token string as the session key
+        
+        # --- SINGLE SESSION ENFORCEMENT ---
+        # Check if this specific token is the active session in the database
+        # We enforce this for ALL users now.
+        try:
+            # We compare the string representation of the token
+            active_session = Session.objects.get(user=user)
             token_str = raw_token.decode('utf-8') if isinstance(raw_token, bytes) else str(raw_token)
-            try:
-                Session.objects.get(user=user, session_key=token_str)
-            except Session.DoesNotExist:
-                raise AuthenticationFailed('Session expired or invalid. Please login again.')
-
+            
+            if str(active_session.session_key) != token_str:
+                raise AuthenticationFailed('This session has expired because you logged in on another device.')
+        except Session.DoesNotExist:
+            # If no session record exists, it's invalid.
+            raise AuthenticationFailed('Invalid session. Please log in again.')
+            
         return user, validated_token

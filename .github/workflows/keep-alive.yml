@@ -1,0 +1,18 @@
+name: Keep Render Alive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Backend to Prevent Sleep
+        run: |
+          echo "Pinging Render Backend..."
+          # Use curl to send a lightweight HEAD request (-I)
+          # We ping /api/branches/ because it is public (AllowAny) and lightweight
+          curl -I https://produit-backend.onrender.com/api/branches/
+          echo "Ping Complete."

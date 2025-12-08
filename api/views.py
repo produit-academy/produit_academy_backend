@@ -21,7 +21,6 @@ from .serializers import (
     UserSerializer, CourseRequestSerializer, StudyMaterialSerializer,
     MyTokenObtainPairSerializer, BranchSerializer, ChangePasswordSerializer,
     UserProfileSerializer,
-    # New System Serializers
     QuestionBankSerializer, MockTestGeneratorSerializer,
     MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSerializer,
     MockTestHistorySerializer
@@ -29,12 +28,7 @@ from .serializers import (
 
 # --- EMAIL HELPER FUNCTION ---
 
-def send_html_email(subject, recipient_email, username, otp, type='reset'):
-    """
-    Sends a professional HTML email with the Produit Academy logo.
-    type: 'reset' | 'signup' | 'resend'
-    """
-    
+def send_html_email(subject, recipient_email, username, otp, type='reset'): 
     if type == 'reset':
         title = "Password Reset Request"
         intro = "We received a request to reset the password for your account."
@@ -320,19 +314,9 @@ class MaterialFileView(APIView):
         except StudyMaterial.DoesNotExist:
             raise Http404
 
-# ==========================================
-#  NEW TESTING SYSTEM: ADMIN & STUDENT VIEWS
-# ==========================================
-
 # --- ADMIN: QUESTION BANK & CATEGORY MANAGEMENT ---
 
-
-
 class AdminQuestionBankView(viewsets.ModelViewSet):
-    """
-    Admin ViewSet to Manage the Global Question Bank.
-    Endpoint: /api/admin/questions/
-    """
     permission_classes = [permissions.IsAdminUser]
     queryset = Question.objects.all().order_by('-created_at')
     serializer_class = QuestionBankSerializer
@@ -340,13 +324,6 @@ class AdminQuestionBankView(viewsets.ModelViewSet):
 # --- STUDENT: CUSTOM MOCK TEST SYSTEM ---
 
 class GenerateMockTestView(APIView):
-    """
-    Allows a student to generate a custom test based on:
-    - Categories (e.g., Aptitude, Data Structures)
-    - Number of Questions
-    - Time Limit
-    - Whether to repeat previously attempted questions
-    """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
@@ -361,23 +338,13 @@ class GenerateMockTestView(APIView):
 
             # 2. Filter Questions
             questions_query = Question.objects.all()
-            
-            # Filter by Branch (if provided)
-            # Note: General Aptitude usually has no branch, so we might want to handle that.
-            # But the user logic is "aptitude no need of selecting branch... but math and other subjects select the branch"
             if branch_id:
-                # If categories are provided, we only apply branch filter to non-Aptitude questions?
-                # Actually simpler: The frontend sends branch_id. 
-                # If we want GA questions (which have no branch), we might miss them if we strict filter branch_id=X.
-                # So we should say: (branch_id=X OR category='General Aptitude')
                 from django.db.models import Q
                 questions_query = questions_query.filter(Q(branch_id=branch_id) | Q(category='General Aptitude'))
 
-            # Filter by Category if provided
             if categories:
                 questions_query = questions_query.filter(category__in=categories)
             
-            # Filter by Attempt History if 'allow_repeats' is False
             if not allow_repeats:
                 attempted_q_ids = MockTestQuestion.objects.filter(
                     mock_test__student=request.user
@@ -422,10 +389,6 @@ class GenerateMockTestView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class SubmitMockTestView(APIView):
-    """
-    Handles the submission of a mock test.
-    Calculates the score immediately and marks the test as completed.
-    """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
@@ -437,19 +400,13 @@ class SubmitMockTestView(APIView):
         serializer = MockTestSubmitSerializer(data=request.data)
         if serializer.is_valid():
             total_score = 0.0
-            
-            # Create a map of Question ID -> Selected Choice ID
             answers_map = {item['question_id']: item['choice_id'] for item in serializer.validated_data['answers']}
-            
-            # Fetch all questions for this test
             test_questions = MockTestQuestion.objects.filter(mock_test=mock_test).select_related('question')
             
             for tq in test_questions:
-                # If user provided an answer for this question
                 if tq.question.id in answers_map:
                     choice_id = answers_map[tq.question.id]
                     try:
-                        # Verify the choice belongs to the question
                         selected_choice = Choice.objects.get(id=choice_id, question=tq.question)
                         tq.selected_choice = selected_choice
                         
@@ -458,11 +415,10 @@ class SubmitMockTestView(APIView):
                             total_score += tq.question.marks
                             
                     except Choice.DoesNotExist:
-                        pass # Invalid choice ID ignored
+                        pass
                 
                 tq.save()
 
-            # Finalize Test
             mock_test.score = total_score
             mock_test.is_completed = True
             mock_test.completed_at = timezone.now()
@@ -477,9 +433,6 @@ class SubmitMockTestView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class StudentMockTestHistoryView(generics.ListAPIView):
-    """
-    Lists all mock tests attempted by the student, ordered by newest first.
-    """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MockTestHistorySerializer
 
@@ -487,9 +440,6 @@ class StudentMockTestHistoryView(generics.ListAPIView):
         return MockTest.objects.filter(student=self.request.user).order_by('-created_at')
 
 class AdminStudentHistoryView(generics.ListAPIView):
-    """
-    Allows ADMIN to view a specific student's test history
-    """
     permission_classes = [permissions.IsAdminUser]
     serializer_class = MockTestHistorySerializer
 
@@ -498,25 +448,14 @@ class AdminStudentHistoryView(generics.ListAPIView):
         return MockTest.objects.filter(student_id=student_id).order_by('-created_at')
 
 class StudentMockTestAnalyticsView(generics.RetrieveAPIView):
-    """
-    Provides a detailed view of a specific test including:
-    - User's answers vs Correct answers
-    - Score breakdown by category
-    
-    Access is RESTRICTED to completed tests only.
-    """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MockTestResultSerializer
     queryset = MockTest.objects.all()
 
     def get_object(self):
         obj = super().get_object()
-        # Security Check: User must own the test
         if obj.student != self.request.user:
             raise PermissionDenied("You do not have permission to view this test.")
-        
-        # Logic Check: Test must be finished to see answers
         if not obj.is_completed:
             raise PermissionDenied("You must complete the test to view analytics.")
-        
         return obj

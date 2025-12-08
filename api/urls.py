@@ -3,14 +3,12 @@ from rest_framework.routers import DefaultRouter
 from .views import *
 from rest_framework_simplejwt.views import TokenRefreshView
 
-# Router for Admin ViewSets
 router = DefaultRouter()
-
 router.register(r'admin/questions', AdminQuestionBankView, basename='admin-questions')
 
 urlpatterns = [
     # --- Auth & Core ---
-    path('', include(router.urls)), # Includes admin/categories and admin/questions
+    path('', include(router.urls)),
     path('branches/', BranchListView.as_view(), name='branch-list'),
     path('signup/', SignUpView.as_view(), name='signup'),
     path('login/', MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
@@ -28,7 +26,7 @@ urlpatterns = [
     path('materials/upload/', StudyMaterialUploadView.as_view(), name='material-upload'),
     path('materials/<int:pk>/view/', MaterialFileView.as_view(), name='material-view'),
 
-    # --- NEW: Student Custom Mock Tests ---
+    # --- Student Custom Mock Tests ---
     path('student/tests/generate/', GenerateMockTestView.as_view(), name='generate-test'),
     path('student/tests/<int:pk>/submit/', SubmitMockTestView.as_view(), name='submit-test'),
     path('student/tests/history/', StudentMockTestHistoryView.as_view(), name='test-history'),

@@ -69,8 +69,6 @@ class CourseRequestSerializer(serializers.ModelSerializer):
 
 # --- QUESTION BANK SERIALIZERS (ADMIN) ---
 
-# deleted CategorySerializer
-
 class ChoiceSerializer(serializers.ModelSerializer):
     class Meta: model = Choice; fields = ['id', 'text', 'is_correct']
 
@@ -112,9 +110,8 @@ class MockTestGeneratorSerializer(serializers.Serializer):
     time_limit_minutes = serializers.IntegerField(min_value=5, max_value=180, default=30)
     allow_repeats = serializers.BooleanField(default=True)
 
-# 1. Taking the Test (Hides Correct Answers)
 class StudentChoiceSerializer(serializers.ModelSerializer):
-    class Meta: model = Choice; fields = ['id', 'text'] # No is_correct
+    class Meta: model = Choice; fields = ['id', 'text']
 
 class MockTestQuestionSerializer(serializers.ModelSerializer):
     question_text = serializers.CharField(source='question.text', read_only=True)
@@ -133,7 +130,6 @@ class MockTestSessionSerializer(serializers.ModelSerializer):
         model = MockTest
         fields = ['id', 'created_at', 'total_questions', 'time_limit_minutes', 'questions']
 
-# 2. Test Submission
 class AnswerSubmissionSerializer(serializers.Serializer):
     question_id = serializers.IntegerField()
     choice_id = serializers.IntegerField()
@@ -141,9 +137,8 @@ class AnswerSubmissionSerializer(serializers.Serializer):
 class MockTestSubmitSerializer(serializers.Serializer):
     answers = serializers.ListField(child=AnswerSubmissionSerializer())
 
-# 3. Analytics & Review (Shows Correct Answers)
 class QuestionReviewSerializer(serializers.ModelSerializer):
-    choices = ChoiceSerializer(many=True, read_only=True) # Includes is_correct
+    choices = ChoiceSerializer(many=True, read_only=True)
     class Meta: model = Question; fields = ['id', 'text', 'choices', 'marks', 'category']
 
 class MockTestQuestionReviewSerializer(serializers.ModelSerializer):
@@ -163,7 +158,6 @@ class MockTestResultSerializer(serializers.ModelSerializer):
         fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'time_limit_minutes', 'questions', 'category_analysis']
 
     def get_category_analysis(self, obj):
-        # Calculate performance per category
         analysis = {}
         for tq in obj.test_questions.all():
             cat_name = tq.question.category or "Uncategorized"
@@ -182,7 +176,6 @@ class MockTestHistorySerializer(serializers.ModelSerializer):
         fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'is_completed', 'total_marks']
 
     def get_total_marks(self, obj):
-        # Calculate total possible marks for this test
         total = 0
         for tq in obj.test_questions.all():
             total += tq.question.marks

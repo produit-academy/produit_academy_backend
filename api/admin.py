@@ -8,7 +8,7 @@ from .models import (
 
 class ChoiceInline(admin.TabularInline):
     model = Choice
-    extra = 4  # Default to 4 choices per question
+    extra = 4
 
 class MockTestQuestionInline(admin.TabularInline):
     model = MockTestQuestion

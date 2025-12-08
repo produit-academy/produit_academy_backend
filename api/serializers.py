@@ -3,7 +3,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
-    Category, Question, Choice, MockTest, MockTestQuestion
+    Question, Choice, MockTest, MockTestQuestion
 )
 
 # --- AUTH & CORE SERIALIZERS (Unchanged from original) ---
@@ -69,20 +69,19 @@ class CourseRequestSerializer(serializers.ModelSerializer):
 
 # --- QUESTION BANK SERIALIZERS (ADMIN) ---
 
-class CategorySerializer(serializers.ModelSerializer):
-    class Meta: model = Category; fields = '__all__'
+# deleted CategorySerializer
 
 class ChoiceSerializer(serializers.ModelSerializer):
     class Meta: model = Choice; fields = ['id', 'text', 'is_correct']
 
 class QuestionBankSerializer(serializers.ModelSerializer):
     choices = ChoiceSerializer(many=True)
-    category_name = serializers.CharField(source='category.name', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
     
     class Meta:
         model = Question
-        fields = ['id', 'text', 'category', 'category_name', 'marks', 'choices']
-
+        fields = ['id', 'text', 'category', 'branch', 'branch_name', 'marks', 'choices']
+    
     def create(self, validated_data):
         choices_data = validated_data.pop('choices')
         question = Question.objects.create(**validated_data)
@@ -93,6 +92,7 @@ class QuestionBankSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         instance.text = validated_data.get('text', instance.text)
         instance.category = validated_data.get('category', instance.category)
+        instance.branch = validated_data.get('branch', instance.branch)
         instance.marks = validated_data.get('marks', instance.marks)
         instance.save()
 
@@ -100,17 +100,17 @@ class QuestionBankSerializer(serializers.ModelSerializer):
             choices_data = validated_data.pop('choices')
             instance.choices.all().delete()
             for choice_data in choices_data:
-                Choice.objects.create(question=instance, **choice_data)
+                Choice.objects.create(instance, **choice_data)
         return instance
 
 # --- MOCK TEST SERIALIZERS (STUDENT) ---
 
 class MockTestGeneratorSerializer(serializers.Serializer):
-    """Input serializer for generating a new test"""
-    category_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
+    branch_id = serializers.IntegerField(required=False, allow_null=True)
+    categories = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
     number_of_questions = serializers.IntegerField(min_value=1, max_value=100, default=10)
     time_limit_minutes = serializers.IntegerField(min_value=5, max_value=180, default=30)
-    allow_repeats = serializers.BooleanField(default=True, help_text="Allow questions already attempted in previous tests")
+    allow_repeats = serializers.BooleanField(default=True)
 
 # 1. Taking the Test (Hides Correct Answers)
 class StudentChoiceSerializer(serializers.ModelSerializer):
@@ -166,7 +166,7 @@ class MockTestResultSerializer(serializers.ModelSerializer):
         # Calculate performance per category
         analysis = {}
         for tq in obj.test_questions.all():
-            cat_name = tq.question.category.name if tq.question.category else "Uncategorized"
+            cat_name = tq.question.category or "Uncategorized"
             if cat_name not in analysis:
                 analysis[cat_name] = {'total': 0, 'correct': 0}
             analysis[cat_name]['total'] += 1
@@ -175,6 +175,15 @@ class MockTestResultSerializer(serializers.ModelSerializer):
         return analysis
 
 class MockTestHistorySerializer(serializers.ModelSerializer):
+    total_marks = serializers.SerializerMethodField()
+
     class Meta:
         model = MockTest
-        fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'is_completed']
+        fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'is_completed', 'total_marks']
+
+    def get_total_marks(self, obj):
+        # Calculate total possible marks for this test
+        total = 0
+        for tq in obj.test_questions.all():
+            total += tq.question.marks
+        return total

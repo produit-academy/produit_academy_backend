@@ -69,16 +69,17 @@ class Session(models.Model):
 
 # --- QUESTION BANK & MOCK TEST MODELS ---
 
-class Category(models.Model):
-    """Categories for questions, e.g., 'Aptitude', 'Data Structures', 'Thermodynamics'"""
-    name = models.CharField(max_length=100)
-    description = models.TextField(blank=True, null=True)
 
-    def __str__(self):
-        return self.name
 
 class Question(models.Model):
-    category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, related_name='questions')
+    CATEGORY_CHOICES = (
+        ('General Aptitude', 'General Aptitude'),
+        ('Engineering Mathematics', 'Engineering Mathematics'),
+        ('Subject Paper', 'Subject Paper')
+    )
+    
+    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='Subject Paper')
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True)
     text = models.TextField()
     marks = models.IntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)

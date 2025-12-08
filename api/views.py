@@ -15,14 +15,14 @@ from rest_framework.exceptions import PermissionDenied
 
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
-    Category, Question, Choice, MockTest, MockTestQuestion
+    Question, Choice, MockTest, MockTestQuestion
 )
 from .serializers import (
     UserSerializer, CourseRequestSerializer, StudyMaterialSerializer,
     MyTokenObtainPairSerializer, BranchSerializer, ChangePasswordSerializer,
     UserProfileSerializer,
     # New System Serializers
-    CategorySerializer, QuestionBankSerializer, MockTestGeneratorSerializer,
+    QuestionBankSerializer, MockTestGeneratorSerializer,
     MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSerializer,
     MockTestHistorySerializer
 )
@@ -126,11 +126,12 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 serializer.is_valid(raise_exception=True)
                 user = serializer.user
                 
-                # Single Session Enforcement
-                Session.objects.filter(user=user).delete()
-                session_key = response.data.get('access')
-                if session_key:
-                    Session.objects.create(user=user, session_key=str(session_key))
+                # Single Session Enforcement (STUDENTS ONLY)
+                if user.role == 'student':
+                    Session.objects.filter(user=user).delete()
+                    session_key = response.data.get('access')
+                    if session_key:
+                        Session.objects.create(user=user, session_key=str(session_key))
                 
                 if user.is_superuser or user.is_staff:
                     response.data['role'] = 'admin'
@@ -325,14 +326,7 @@ class MaterialFileView(APIView):
 
 # --- ADMIN: QUESTION BANK & CATEGORY MANAGEMENT ---
 
-class AdminCategoryView(viewsets.ModelViewSet):
-    """
-    Admin ViewSet to Create, Read, Update, Delete Question Categories.
-    Endpoint: /api/admin/categories/
-    """
-    permission_classes = [permissions.IsAdminUser]
-    queryset = Category.objects.all()
-    serializer_class = CategorySerializer
+
 
 class AdminQuestionBankView(viewsets.ModelViewSet):
     """
@@ -359,7 +353,8 @@ class GenerateMockTestView(APIView):
         serializer = MockTestGeneratorSerializer(data=request.data)
         if serializer.is_valid():
             # 1. Extract Preferences
-            category_ids = serializer.validated_data.get('category_ids')
+            branch_id = serializer.validated_data.get('branch_id')
+            categories = serializer.validated_data.get('categories')
             num_questions = serializer.validated_data.get('number_of_questions')
             time_limit = serializer.validated_data.get('time_limit_minutes')
             allow_repeats = serializer.validated_data.get('allow_repeats')
@@ -367,9 +362,20 @@ class GenerateMockTestView(APIView):
             # 2. Filter Questions
             questions_query = Question.objects.all()
             
+            # Filter by Branch (if provided)
+            # Note: General Aptitude usually has no branch, so we might want to handle that.
+            # But the user logic is "aptitude no need of selecting branch... but math and other subjects select the branch"
+            if branch_id:
+                # If categories are provided, we only apply branch filter to non-Aptitude questions?
+                # Actually simpler: The frontend sends branch_id. 
+                # If we want GA questions (which have no branch), we might miss them if we strict filter branch_id=X.
+                # So we should say: (branch_id=X OR category='General Aptitude')
+                from django.db.models import Q
+                questions_query = questions_query.filter(Q(branch_id=branch_id) | Q(category='General Aptitude'))
+
             # Filter by Category if provided
-            if category_ids:
-                questions_query = questions_query.filter(category_id__in=category_ids)
+            if categories:
+                questions_query = questions_query.filter(category__in=categories)
             
             # Filter by Attempt History if 'allow_repeats' is False
             if not allow_repeats:
@@ -479,6 +485,17 @@ class StudentMockTestHistoryView(generics.ListAPIView):
 
     def get_queryset(self):
         return MockTest.objects.filter(student=self.request.user).order_by('-created_at')
+
+class AdminStudentHistoryView(generics.ListAPIView):
+    """
+    Allows ADMIN to view a specific student's test history
+    """
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = MockTestHistorySerializer
+
+    def get_queryset(self):
+        student_id = self.kwargs['pk']
+        return MockTest.objects.filter(student_id=student_id).order_by('-created_at')
 
 class StudentMockTestAnalyticsView(generics.RetrieveAPIView):
     """

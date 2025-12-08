@@ -5,7 +5,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 # Router for Admin ViewSets
 router = DefaultRouter()
-router.register(r'admin/categories', AdminCategoryView, basename='admin-categories')
+
 router.register(r'admin/questions', AdminQuestionBankView, basename='admin-questions')
 
 urlpatterns = [
@@ -38,5 +38,6 @@ urlpatterns = [
     path('admin/dashboard/', AdminDashboardView.as_view(), name='admin_dashboard'),
     path('admin/students/', StudentListView.as_view(), name='student-list'),
     path('admin/students/<int:pk>/', StudentManageView.as_view(), name='student-manage'),
+    path('admin/students/<int:pk>/history/', AdminStudentHistoryView.as_view(), name='admin-student-history'),
     path('courserequests/<int:pk>/update/', CourseRequestUpdateView.as_view(), name='course-request-update'),
 ]

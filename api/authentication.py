@@ -19,17 +19,18 @@ class SingleSessionJWTAuthentication(JWTAuthentication):
         user = self.get_user(validated_token)
         
         # --- SINGLE SESSION ENFORCEMENT ---
-        # Check if this specific token is the active session in the database
-        # We enforce this for ALL users now.
-        try:
-            # We compare the string representation of the token
-            active_session = Session.objects.get(user=user)
-            token_str = raw_token.decode('utf-8') if isinstance(raw_token, bytes) else str(raw_token)
-            
-            if str(active_session.session_key) != token_str:
-                raise AuthenticationFailed('This session has expired because you logged in on another device.')
-        except Session.DoesNotExist:
-            # If no session record exists, it's invalid.
-            raise AuthenticationFailed('Invalid session. Please log in again.')
+        # Only enforce for STUDENTS. Admins are exempt.
+        if user.role == 'student':
+            try:
+                # We compare the string representation of the token
+                active_session = Session.objects.get(user=user)
+                token_str = raw_token.decode('utf-8') if isinstance(raw_token, bytes) else str(raw_token)
+                
+                if str(active_session.session_key) != token_str:
+                    raise AuthenticationFailed('This session has expired because you logged in on another device.')
+            except Session.DoesNotExist:
+                # If it IS a student but no session found, it might be an old token or manual deletion.
+                # Fail strictly: student MUST have a session record if they logged in via our view.
+                raise AuthenticationFailed('Invalid session. Please log in again.')
             
         return user, validated_token

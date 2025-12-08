@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session,
-    Category, Question, Choice, MockTest, MockTestQuestion
+    Question, Choice, MockTest, MockTestQuestion
 )
 
 # --- INLINES ---
@@ -46,10 +46,6 @@ class CourseRequestAdmin(admin.ModelAdmin):
 class StudyMaterialAdmin(admin.ModelAdmin):
     list_display = ('title', 'branch', 'classification', 'is_preview')
     list_filter = ('branch', 'classification', 'is_preview')
-
-@admin.register(Category)
-class CategoryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'description')
 
 @admin.register(Question)
 class QuestionAdmin(admin.ModelAdmin):

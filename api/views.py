@@ -2,25 +2,29 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
 from django.http import FileResponse, Http404
+from django.shortcuts import get_object_or_404
 from django.utils.html import strip_tags
 from datetime import timedelta
 import random
 
-from rest_framework import generics, permissions, status, parsers, views
+from rest_framework import generics, permissions, status, parsers, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
+from rest_framework.exceptions import PermissionDenied
 
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
-    Quiz, Question, Choice, QuizSubmission
+    Category, Question, Choice, MockTest, MockTestQuestion
 )
 from .serializers import (
     UserSerializer, CourseRequestSerializer, StudyMaterialSerializer,
     MyTokenObtainPairSerializer, BranchSerializer, ChangePasswordSerializer,
-    UserProfileSerializer, QuizSerializer, QuizCreateSerializer, 
-    QuizSubmissionDetailSerializer
+    UserProfileSerializer,
+    # New System Serializers
+    CategorySerializer, QuestionBankSerializer, MockTestGeneratorSerializer,
+    MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSerializer,
+    MockTestHistorySerializer
 )
 
 # --- EMAIL HELPER FUNCTION ---
@@ -44,36 +48,14 @@ def send_html_email(subject, recipient_email, username, otp, type='reset'):
 
     logo_url = "https://produit-academy-frontend.vercel.app/logo.png"
     
-    # Default message body for non-reset types
     message_body = f"""
                 <p>Hi <strong>{username}</strong>,</p>
-                
                 <p>{intro}</p>
-                
                 <p>Your One-Time Password (OTP) is:</p>
-                
                 <div class="otp-box">{otp}</div>
-                
                 <p>This OTP will expire in 10 minutes for security reasons.</p>
-                
                 <p>If you did not request this, please ignore this email or contact support.</p>
     """
-
-    # Specific message body for reset type as requested
-    if type == 'reset':
-        message_body = f"""
-                <p>Hi <strong>{username}</strong>,</p>
-
-                <p>We received a request to reset the password for your account.</p>
-
-                <p>Your One-Time Password (OTP) is:</p>
-
-                <div class="otp-box">{otp}</div>
-
-                <p>This OTP will expire in 10 minutes for security reasons.</p>
-
-                <p>If you did not request a password reset, please ignore this email or contact support.</p>
-        """
 
     html_content = f"""
     <!DOCTYPE html>
@@ -144,19 +126,17 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 serializer.is_valid(raise_exception=True)
                 user = serializer.user
                 
-                # Single Session Enforcement (All Users)
+                # Single Session Enforcement
                 Session.objects.filter(user=user).delete()
-                
                 session_key = response.data.get('access')
                 if session_key:
                     Session.objects.create(user=user, session_key=str(session_key))
                 
-                # Send role to frontend for redirection
                 if user.is_superuser or user.is_staff:
                     response.data['role'] = 'admin'
                 else:
                     response.data['role'] = user.role 
-            except Exception as e:
+            except Exception:
                 pass
         return response
 
@@ -166,30 +146,18 @@ class SignUpView(generics.CreateAPIView):
 
     def perform_create(self, serializer):
         user = serializer.save()
-        
-        # Student ID Generation
         user.student_id = f"PROD-{random.randint(1000, 9999)}"
-        
-        # OTP Generation
         otp = str(random.randint(100000, 999999))
         user.otp = otp
         user.otp_expiry = timezone.now() + timedelta(minutes=10)
         user.save()
 
-        # Auto-create Course Request if branch selected
         if user.branch:
             if not CourseRequest.objects.filter(student=user, branch=user.branch).exists():
                 CourseRequest.objects.create(student=user, branch=user.branch, status='Pending')
 
-        # Send Email
         try:
-            send_html_email(
-                'Welcome to Produit Academy - Verify Email',
-                user.email,
-                user.username,
-                otp,
-                type='signup'
-            )
+            send_html_email('Welcome to Produit Academy - Verify Email', user.email, user.username, otp, type='signup')
         except Exception as e:
             print(f"Email Error: {e}")
 
@@ -221,15 +189,9 @@ class ResendOTPView(APIView):
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
             try:
-                send_html_email(
-                    'New Verification Code',
-                    user.email,
-                    user.username,
-                    otp,
-                    type='resend'
-                )
+                send_html_email('New Verification Code', user.email, user.username, otp, type='resend')
                 return Response({'detail': 'OTP resent successfully'})
-            except Exception as e:
+            except Exception:
                 return Response({'detail': 'Failed to send email'}, status=500)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
@@ -250,18 +212,10 @@ class PasswordResetRequestOTPView(APIView):
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save()
-            
             try:
-                send_html_email(
-                    'Password Reset Request',
-                    user.email,
-                    user.username,
-                    otp,
-                    type='reset'
-                )
+                send_html_email('Password Reset Request', user.email, user.username, otp, type='reset')
                 return Response({'detail': 'OTP sent'})
-            except Exception as e:
-                print(f"Email Error: {e}")
+            except Exception:
                 return Response({'detail': 'Failed to send email'}, status=500)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=404)
@@ -340,16 +294,9 @@ class StudyMaterialView(generics.ListAPIView):
     serializer_class = StudyMaterialSerializer
     def get_queryset(self):
         user = self.request.user
-        
         if not user.branch:
             return StudyMaterial.objects.none()
-
-        is_approved = CourseRequest.objects.filter(
-            student=user, 
-            branch=user.branch, 
-            status='Approved'
-        ).exists()
-
+        is_approved = CourseRequest.objects.filter(student=user, branch=user.branch, status='Approved').exists()
         if is_approved:
             return StudyMaterial.objects.filter(branch=user.branch)
         else:
@@ -372,105 +319,187 @@ class MaterialFileView(APIView):
         except StudyMaterial.DoesNotExist:
             raise Http404
 
-# --- QUIZ & EXAM SYSTEM ---
+# ==========================================
+#  NEW TESTING SYSTEM: ADMIN & STUDENT VIEWS
+# ==========================================
 
-class QuizCreateView(generics.CreateAPIView):
+# --- ADMIN: QUESTION BANK & CATEGORY MANAGEMENT ---
+
+class AdminCategoryView(viewsets.ModelViewSet):
+    """
+    Admin ViewSet to Create, Read, Update, Delete Question Categories.
+    Endpoint: /api/admin/categories/
+    """
     permission_classes = [permissions.IsAdminUser]
-    queryset = Quiz.objects.all()
-    serializer_class = QuizCreateSerializer
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
 
-class StudentQuizListView(generics.ListAPIView):
+class AdminQuestionBankView(viewsets.ModelViewSet):
+    """
+    Admin ViewSet to Manage the Global Question Bank.
+    Endpoint: /api/admin/questions/
+    """
+    permission_classes = [permissions.IsAdminUser]
+    queryset = Question.objects.all().order_by('-created_at')
+    serializer_class = QuestionBankSerializer
+
+# --- STUDENT: CUSTOM MOCK TEST SYSTEM ---
+
+class GenerateMockTestView(APIView):
+    """
+    Allows a student to generate a custom test based on:
+    - Categories (e.g., Aptitude, Data Structures)
+    - Number of Questions
+    - Time Limit
+    - Whether to repeat previously attempted questions
+    """
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = QuizSerializer
 
-    def get_queryset(self):
-        user = self.request.user
-        if user.branch and CourseRequest.objects.filter(student=user, branch=user.branch, status='Approved').exists():
-            return Quiz.objects.filter(branch=user.branch)
-        return Quiz.objects.none()
+    def post(self, request):
+        serializer = MockTestGeneratorSerializer(data=request.data)
+        if serializer.is_valid():
+            # 1. Extract Preferences
+            category_ids = serializer.validated_data.get('category_ids')
+            num_questions = serializer.validated_data.get('number_of_questions')
+            time_limit = serializer.validated_data.get('time_limit_minutes')
+            allow_repeats = serializer.validated_data.get('allow_repeats')
 
-class StudentQuizDetailView(generics.RetrieveAPIView):
-    permission_classes = [permissions.IsAuthenticated]
-    serializer_class = QuizSerializer
-    queryset = Quiz.objects.all()
+            # 2. Filter Questions
+            questions_query = Question.objects.all()
+            
+            # Filter by Category if provided
+            if category_ids:
+                questions_query = questions_query.filter(category_id__in=category_ids)
+            
+            # Filter by Attempt History if 'allow_repeats' is False
+            if not allow_repeats:
+                attempted_q_ids = MockTestQuestion.objects.filter(
+                    mock_test__student=request.user
+                ).values_list('question_id', flat=True)
+                questions_query = questions_query.exclude(id__in=attempted_q_ids)
 
-    def get_object(self):
-        obj = super().get_object()
-        user = self.request.user
-        
-        has_approval = CourseRequest.objects.filter(
-            student=user, 
-            branch=user.branch, 
-            status='Approved'
-        ).exists()
+            # 3. Random Selection
+            available_ids = list(questions_query.values_list('id', flat=True))
+            
+            if len(available_ids) < num_questions:
+                return Response(
+                    {
+                        "error": f"Not enough questions available matching criteria. Found {len(available_ids)}, requested {num_questions}.",
+                        "available_count": len(available_ids)
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            selected_ids = random.sample(available_ids, num_questions)
+            
+            # 4. Create Mock Test Session
+            mock_test = MockTest.objects.create(
+                student=request.user,
+                total_questions=num_questions,
+                time_limit_minutes=time_limit,
+                is_completed=False
+            )
 
-        if not has_approval or obj.branch != user.branch:
-            raise PermissionDenied("You do not have access to this quiz.")
-        
-        return obj
+            # 5. Link Questions to Test (Bulk Create for Efficiency)
+            test_questions = []
+            for index, q_id in enumerate(selected_ids):
+                test_questions.append(MockTestQuestion(
+                    mock_test=mock_test,
+                    question_id=q_id,
+                    order=index + 1
+                ))
+            MockTestQuestion.objects.bulk_create(test_questions)
 
-class QuizSubmitView(APIView):
+            # 6. Return the Test Session Data (Hiding answers)
+            return Response(MockTestSessionSerializer(mock_test).data, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class SubmitMockTestView(APIView):
+    """
+    Handles the submission of a mock test.
+    Calculates the score immediately and marks the test as completed.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
-        try:
-            quiz = Quiz.objects.get(pk=pk)
-            user = request.user
-            has_approval = CourseRequest.objects.filter(
-                student=user, 
-                branch=user.branch, 
-                status='Approved'
-            ).exists()
+        mock_test = get_object_or_404(MockTest, pk=pk, student=request.user)
 
-            if not has_approval or quiz.branch != user.branch:
-                return Response({'error': 'You do not have permission to submit this quiz.'}, status=403)
+        if mock_test.is_completed:
+            return Response({"error": "Test already submitted."}, status=status.HTTP_400_BAD_REQUEST)
 
-            answers = request.data.get('answers', [])
-            score = 0.0
-
-            for ans in answers:
-                try:
-                    choice = Choice.objects.get(id=ans['choice_id'], question_id=ans['question_id'])
-                    if choice.is_correct:
-                        score += choice.question.marks
-                except Choice.DoesNotExist:
-                    continue
+        serializer = MockTestSubmitSerializer(data=request.data)
+        if serializer.is_valid():
+            total_score = 0.0
             
-            QuizSubmission.objects.create(student=user, quiz=quiz, score=score)
-            return Response({'score': score, 'message': 'Quiz Submitted Successfully'})
-        except Quiz.DoesNotExist:
-            return Response({'error': 'Quiz not found'}, status=404)
+            # Create a map of Question ID -> Selected Choice ID
+            answers_map = {item['question_id']: item['choice_id'] for item in serializer.validated_data['answers']}
+            
+            # Fetch all questions for this test
+            test_questions = MockTestQuestion.objects.filter(mock_test=mock_test).select_related('question')
+            
+            for tq in test_questions:
+                # If user provided an answer for this question
+                if tq.question.id in answers_map:
+                    choice_id = answers_map[tq.question.id]
+                    try:
+                        # Verify the choice belongs to the question
+                        selected_choice = Choice.objects.get(id=choice_id, question=tq.question)
+                        tq.selected_choice = selected_choice
+                        
+                        if selected_choice.is_correct:
+                            tq.is_correct = True
+                            total_score += tq.question.marks
+                            
+                    except Choice.DoesNotExist:
+                        pass # Invalid choice ID ignored
+                
+                tq.save()
 
-class StudentAnalyticsListView(generics.ListAPIView):
+            # Finalize Test
+            mock_test.score = total_score
+            mock_test.is_completed = True
+            mock_test.completed_at = timezone.now()
+            mock_test.save()
+
+            return Response({
+                "message": "Test submitted successfully",
+                "score": total_score,
+                "test_id": mock_test.id
+            }, status=status.HTTP_200_OK)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class StudentMockTestHistoryView(generics.ListAPIView):
+    """
+    Lists all mock tests attempted by the student, ordered by newest first.
+    """
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = QuizSubmissionDetailSerializer
-    def get_queryset(self):
-        return QuizSubmission.objects.filter(student=self.request.user).order_by('-submitted_at')
+    serializer_class = MockTestHistorySerializer
 
-class StudentResultDetailView(generics.RetrieveAPIView):
+    def get_queryset(self):
+        return MockTest.objects.filter(student=self.request.user).order_by('-created_at')
+
+class StudentMockTestAnalyticsView(generics.RetrieveAPIView):
+    """
+    Provides a detailed view of a specific test including:
+    - User's answers vs Correct answers
+    - Score breakdown by category
+    
+    Access is RESTRICTED to completed tests only.
+    """
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = QuizSubmissionDetailSerializer
-    queryset = QuizSubmission.objects.all()
+    serializer_class = MockTestResultSerializer
+    queryset = MockTest.objects.all()
 
-class AdminQuizListView(generics.ListAPIView):
-    permission_classes = [permissions.IsAdminUser]
-    serializer_class = QuizSerializer
-    queryset = Quiz.objects.all().order_by('-created_at')
-
-class AdminQuizDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAdminUser]
-    serializer_class = QuizCreateSerializer
-    queryset = Quiz.objects.all()
-
-class AdminGlobalAnalyticsView(generics.ListAPIView):
-    permission_classes = [permissions.IsAdminUser]
-    serializer_class = QuizSubmissionDetailSerializer
-    queryset = QuizSubmission.objects.all().order_by('-submitted_at')
-
-class AdminStudentHistoryView(generics.ListAPIView):
-    permission_classes = [permissions.IsAdminUser]
-    serializer_class = QuizSubmissionDetailSerializer
-
-    def get_queryset(self):
-        student_id = self.kwargs['pk']
-        return QuizSubmission.objects.filter(student_id=student_id).order_by('-submitted_at')
+    def get_object(self):
+        obj = super().get_object()
+        # Security Check: User must own the test
+        if obj.student != self.request.user:
+            raise PermissionDenied("You do not have permission to view this test.")
+        
+        # Logic Check: Test must be finished to see answers
+        if not obj.is_completed:
+            raise PermissionDenied("You must complete the test to view analytics.")
+        
+        return obj

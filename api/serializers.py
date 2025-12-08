@@ -3,10 +3,10 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
-    Quiz, Question, Choice, QuizSubmission
+    Category, Question, Choice, MockTest, MockTestQuestion
 )
 
-# --- AUTHENTICATION SERIALIZERS ---
+# --- AUTH & CORE SERIALIZERS (Unchanged from original) ---
 
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
@@ -17,28 +17,21 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
             token['role'] = 'admin'
         else:
             token['role'] = user.role
-        
-        # Check if profile is complete (college and phone_number are required)
         token['profile_complete'] = bool(user.college and user.phone_number)
-        
         return token
 
     def validate(self, attrs):
         data = super().validate(attrs)
-        user = self.user
-        if not user.is_active:
-            raise AuthenticationFailed('Account is inactive. Please verify your email.')
+        if not self.user.is_active:
+            raise AuthenticationFailed('Account is inactive.')
         return data
 
 class UserSerializer(serializers.ModelSerializer):
-    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), required=False, allow_null=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
-
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'branch_name', 'college', 'phone_number')
         extra_kwargs = {'password': {'write_only': True}}
-
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
         user.is_active = False 
@@ -48,28 +41,20 @@ class UserSerializer(serializers.ModelSerializer):
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=True)
     new_password = serializers.CharField(required=True)
-
     def validate_old_password(self, value):
-        user = self.context['request'].user
-        if not user.check_password(value):
+        if not self.context['request'].user.check_password(value):
             raise serializers.ValidationError("Old password is not correct")
         return value
-
     def update(self, instance, validated_data):
         instance.set_password(validated_data['new_password'])
         instance.save()
         return instance
-
-class ResetPasswordSerializer(serializers.Serializer):
-    password = serializers.CharField(required=True)
 
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ('username', 'email', 'college', 'phone_number')
         read_only_fields = ('email',)
-
-# --- CORE MODELS SERIALIZERS ---
 
 class BranchSerializer(serializers.ModelSerializer):
     class Meta: model = Branch; fields = '__all__'
@@ -82,86 +67,114 @@ class CourseRequestSerializer(serializers.ModelSerializer):
     branch = BranchSerializer(read_only=True)
     class Meta: model = CourseRequest; fields = '__all__'
 
-# --- QUIZ & EXAM SERIALIZERS ---
+# --- QUESTION BANK SERIALIZERS (ADMIN) ---
 
-# 1. Student View (Taking the Quiz) - HIDES Correct Answers
+class CategorySerializer(serializers.ModelSerializer):
+    class Meta: model = Category; fields = '__all__'
+
 class ChoiceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Choice
-        fields = ['id', 'text'] # Excludes 'is_correct'
-
-class QuestionSerializer(serializers.ModelSerializer):
-    choices = ChoiceSerializer(many=True)
-    class Meta:
-        model = Question
-        fields = ['id', 'text', 'marks', 'choices']
-
-class QuizSerializer(serializers.ModelSerializer):
-    questions = QuestionSerializer(many=True)
-    class Meta:
-        model = Quiz
-        fields = ['id', 'title', 'duration_minutes', 'total_marks', 'questions']
-
-# 2. Admin View (Creating Quiz) - Includes Write Logic
-class ChoiceWriteSerializer(serializers.ModelSerializer):
-    class Meta: model = Choice; fields = ['text', 'is_correct']
-
-class QuestionWriteSerializer(serializers.ModelSerializer):
-    choices = ChoiceWriteSerializer(many=True)
-    class Meta: model = Question; fields = ['text', 'marks', 'choices']
-
-class QuizCreateSerializer(serializers.ModelSerializer):
-    questions = QuestionWriteSerializer(many=True)
-    
-    class Meta:
-        model = Quiz
-        fields = ['title', 'branch', 'duration_minutes', 'total_marks', 'questions']
-
-    def create(self, validated_data):
-        questions_data = validated_data.pop('questions')
-        quiz = Quiz.objects.create(**validated_data)
-        for q_data in questions_data:
-            choices_data = q_data.pop('choices')
-            question = Question.objects.create(quiz=quiz, **q_data)
-            for c_data in choices_data:
-                Choice.objects.create(question=question, **c_data)
-        return quiz
-
-    def update(self, instance, validated_data):
-        # 1. Update Quiz Fields
-        instance.title = validated_data.get('title', instance.title)
-        instance.branch = validated_data.get('branch', instance.branch)
-        instance.duration_minutes = validated_data.get('duration_minutes', instance.duration_minutes)
-        instance.total_marks = validated_data.get('total_marks', instance.total_marks)
-        instance.save()
-
-        # 2. Handle Nested Questions
-        # Strategy: Clear existing questions and re-create them (Simplest for MVP consistency)
-        # Warning: This resets question IDs. 
-        if 'questions' in validated_data:
-            questions_data = validated_data.pop('questions')
-            instance.questions.all().delete() # Delete old questions
-            
-            for q_data in questions_data:
-                choices_data = q_data.pop('choices')
-                question = Question.objects.create(quiz=instance, **q_data)
-                for c_data in choices_data:
-                    Choice.objects.create(question=question, **c_data)
-        
-        return instance
-
-# 3. Analytics View (Viewing Results) - SHOWS Correct Answers
-class ChoiceDetailSerializer(serializers.ModelSerializer):
     class Meta: model = Choice; fields = ['id', 'text', 'is_correct']
 
-class QuestionResultSerializer(serializers.ModelSerializer):
-    choices = ChoiceDetailSerializer(many=True)
-    class Meta: model = Question; fields = ['id', 'text', 'marks', 'choices']
+class QuestionBankSerializer(serializers.ModelSerializer):
+    choices = ChoiceSerializer(many=True)
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    
+    class Meta:
+        model = Question
+        fields = ['id', 'text', 'category', 'category_name', 'marks', 'choices']
 
-class QuizResultSerializer(serializers.ModelSerializer):
-    questions = QuestionResultSerializer(many=True)
-    class Meta: model = Quiz; fields = ['id', 'title', 'total_marks', 'questions']
+    def create(self, validated_data):
+        choices_data = validated_data.pop('choices')
+        question = Question.objects.create(**validated_data)
+        for choice_data in choices_data:
+            Choice.objects.create(question=question, **choice_data)
+        return question
 
-class QuizSubmissionDetailSerializer(serializers.ModelSerializer):
-    quiz = QuizResultSerializer()
-    class Meta: model = QuizSubmission; fields = '__all__'
+    def update(self, instance, validated_data):
+        instance.text = validated_data.get('text', instance.text)
+        instance.category = validated_data.get('category', instance.category)
+        instance.marks = validated_data.get('marks', instance.marks)
+        instance.save()
+
+        if 'choices' in validated_data:
+            choices_data = validated_data.pop('choices')
+            instance.choices.all().delete()
+            for choice_data in choices_data:
+                Choice.objects.create(question=instance, **choice_data)
+        return instance
+
+# --- MOCK TEST SERIALIZERS (STUDENT) ---
+
+class MockTestGeneratorSerializer(serializers.Serializer):
+    """Input serializer for generating a new test"""
+    category_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
+    number_of_questions = serializers.IntegerField(min_value=1, max_value=100, default=10)
+    time_limit_minutes = serializers.IntegerField(min_value=5, max_value=180, default=30)
+    allow_repeats = serializers.BooleanField(default=True, help_text="Allow questions already attempted in previous tests")
+
+# 1. Taking the Test (Hides Correct Answers)
+class StudentChoiceSerializer(serializers.ModelSerializer):
+    class Meta: model = Choice; fields = ['id', 'text'] # No is_correct
+
+class MockTestQuestionSerializer(serializers.ModelSerializer):
+    question_text = serializers.CharField(source='question.text', read_only=True)
+    question_id = serializers.IntegerField(source='question.id', read_only=True)
+    marks = serializers.IntegerField(source='question.marks', read_only=True)
+    choices = StudentChoiceSerializer(source='question.choices', many=True, read_only=True)
+    
+    class Meta:
+        model = MockTestQuestion
+        fields = ['id', 'question_id', 'question_text', 'marks', 'choices', 'order']
+
+class MockTestSessionSerializer(serializers.ModelSerializer):
+    questions = MockTestQuestionSerializer(source='test_questions', many=True, read_only=True)
+    
+    class Meta:
+        model = MockTest
+        fields = ['id', 'created_at', 'total_questions', 'time_limit_minutes', 'questions']
+
+# 2. Test Submission
+class AnswerSubmissionSerializer(serializers.Serializer):
+    question_id = serializers.IntegerField()
+    choice_id = serializers.IntegerField()
+
+class MockTestSubmitSerializer(serializers.Serializer):
+    answers = serializers.ListField(child=AnswerSubmissionSerializer())
+
+# 3. Analytics & Review (Shows Correct Answers)
+class QuestionReviewSerializer(serializers.ModelSerializer):
+    choices = ChoiceSerializer(many=True, read_only=True) # Includes is_correct
+    class Meta: model = Question; fields = ['id', 'text', 'choices', 'marks', 'category']
+
+class MockTestQuestionReviewSerializer(serializers.ModelSerializer):
+    question = QuestionReviewSerializer(read_only=True)
+    selected_choice = ChoiceSerializer(read_only=True)
+    
+    class Meta:
+        model = MockTestQuestion
+        fields = ['id', 'question', 'selected_choice', 'is_correct']
+
+class MockTestResultSerializer(serializers.ModelSerializer):
+    questions = MockTestQuestionReviewSerializer(source='test_questions', many=True, read_only=True)
+    category_analysis = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MockTest
+        fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'time_limit_minutes', 'questions', 'category_analysis']
+
+    def get_category_analysis(self, obj):
+        # Calculate performance per category
+        analysis = {}
+        for tq in obj.test_questions.all():
+            cat_name = tq.question.category.name if tq.question.category else "Uncategorized"
+            if cat_name not in analysis:
+                analysis[cat_name] = {'total': 0, 'correct': 0}
+            analysis[cat_name]['total'] += 1
+            if tq.is_correct:
+                analysis[cat_name]['correct'] += 1
+        return analysis
+
+class MockTestHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MockTest
+        fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'is_completed']

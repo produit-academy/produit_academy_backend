@@ -39,3 +39,5 @@ urlpatterns = [
     path('admin/students/<int:pk>/history/', AdminStudentHistoryView.as_view(), name='admin-student-history'),
     path('courserequests/<int:pk>/update/', CourseRequestUpdateView.as_view(), name='course-request-update'),
 ]
+
+

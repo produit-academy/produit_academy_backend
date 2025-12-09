@@ -70,7 +70,7 @@ class CourseRequestSerializer(serializers.ModelSerializer):
 # --- QUESTION BANK SERIALIZERS (ADMIN) ---
 
 class ChoiceSerializer(serializers.ModelSerializer):
-    class Meta: model = Choice; fields = ['id', 'text', 'is_correct']
+    class Meta: model = Choice; fields = ['id', 'text', 'is_correct', 'image']
 
 class QuestionBankSerializer(serializers.ModelSerializer):
     choices = ChoiceSerializer(many=True)
@@ -78,12 +78,19 @@ class QuestionBankSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Question
-        fields = ['id', 'text', 'category', 'branch', 'branch_name', 'marks', 'choices']
+        fields = ['id', 'text', 'image', 'category', 'branch', 'branch_name', 'marks', 'choices']
     
+    def validate(self, data):
+        if not data.get('text') and not data.get('image'):
+            raise serializers.ValidationError("Either text or image must be provided for the question.")
+        return data
+
     def create(self, validated_data):
         choices_data = validated_data.pop('choices')
         question = Question.objects.create(**validated_data)
         for choice_data in choices_data:
+            if not choice_data.get('text') and not choice_data.get('image'):
+                raise serializers.ValidationError("Either text or image must be provided for all choices.")
             Choice.objects.create(question=question, **choice_data)
         return question
 
@@ -111,17 +118,18 @@ class MockTestGeneratorSerializer(serializers.Serializer):
     allow_repeats = serializers.BooleanField(default=True)
 
 class StudentChoiceSerializer(serializers.ModelSerializer):
-    class Meta: model = Choice; fields = ['id', 'text']
+    class Meta: model = Choice; fields = ['id', 'text', 'image']
 
 class MockTestQuestionSerializer(serializers.ModelSerializer):
     question_text = serializers.CharField(source='question.text', read_only=True)
+    question_image = serializers.CharField(source='question.image', read_only=True)
     question_id = serializers.IntegerField(source='question.id', read_only=True)
     marks = serializers.IntegerField(source='question.marks', read_only=True)
     choices = StudentChoiceSerializer(source='question.choices', many=True, read_only=True)
     
     class Meta:
         model = MockTestQuestion
-        fields = ['id', 'question_id', 'question_text', 'marks', 'choices', 'order']
+        fields = ['id', 'question_id', 'question_text', 'question_image', 'marks', 'choices', 'order']
 
 class MockTestSessionSerializer(serializers.ModelSerializer):
     questions = MockTestQuestionSerializer(source='test_questions', many=True, read_only=True)
@@ -139,7 +147,7 @@ class MockTestSubmitSerializer(serializers.Serializer):
 
 class QuestionReviewSerializer(serializers.ModelSerializer):
     choices = ChoiceSerializer(many=True, read_only=True)
-    class Meta: model = Question; fields = ['id', 'text', 'choices', 'marks', 'category']
+    class Meta: model = Question; fields = ['id', 'text', 'image', 'choices', 'marks', 'category']
 
 class MockTestQuestionReviewSerializer(serializers.ModelSerializer):
     question = QuestionReviewSerializer(read_only=True)

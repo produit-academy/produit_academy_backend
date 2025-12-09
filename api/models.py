@@ -70,7 +70,8 @@ class Question(models.Model):
     
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='Subject Paper')
     branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True)
-    text = models.TextField()
+    text = models.TextField(blank=True, null=True)
+    image = models.TextField(blank=True, null=True)
     marks = models.IntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -79,7 +80,8 @@ class Question(models.Model):
 
 class Choice(models.Model):
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='choices')
-    text = models.CharField(max_length=200)
+    text = models.CharField(max_length=200, blank=True, null=True)
+    image = models.TextField(blank=True, null=True)
     is_correct = models.BooleanField(default=False)
 
     def __str__(self): 

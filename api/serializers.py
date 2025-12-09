@@ -168,12 +168,16 @@ class MockTestResultSerializer(serializers.ModelSerializer):
     def get_category_analysis(self, obj):
         analysis = {}
         for tq in obj.test_questions.all():
-            cat_name = tq.question.category or "Uncategorized"
-            if cat_name not in analysis:
-                analysis[cat_name] = {'total': 0, 'correct': 0}
-            analysis[cat_name]['total'] += 1
-            if tq.is_correct:
-                analysis[cat_name]['correct'] += 1
+            try:
+                cat_name = tq.question.category or "Uncategorized"
+                if cat_name not in analysis:
+                    analysis[cat_name] = {'total': 0, 'correct': 0}
+                analysis[cat_name]['total'] += 1
+                if tq.is_correct:
+                    analysis[cat_name]['correct'] += 1
+            except Exception:
+                # Skip questions that have been deleted or are corrupted
+                continue
         return analysis
 
 class MockTestHistorySerializer(serializers.ModelSerializer):
@@ -186,5 +190,9 @@ class MockTestHistorySerializer(serializers.ModelSerializer):
     def get_total_marks(self, obj):
         total = 0
         for tq in obj.test_questions.all():
-            total += tq.question.marks
+            try:
+                total += tq.question.marks
+            except Exception:
+                # If question is deleted, assume 0 marks or skip
+                continue
         return total

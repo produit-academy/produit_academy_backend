@@ -105,7 +105,7 @@ class QuestionBankSerializer(serializers.ModelSerializer):
             choices_data = validated_data.pop('choices')
             instance.choices.all().delete()
             for choice_data in choices_data:
-                Choice.objects.create(instance, **choice_data)
+                Choice.objects.create(question=instance, **choice_data)
         return instance
 
 # --- MOCK TEST SERIALIZERS (STUDENT) ---

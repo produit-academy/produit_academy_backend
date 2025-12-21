@@ -68,15 +68,26 @@ class Question(models.Model):
         ('Subject Paper', 'Subject Paper')
     )
     
+    TYPE_CHOICES = (
+        ('MCQ', 'Multiple Choice Question'),
+        ('MSQ', 'Multiple Select Question'),
+        ('NAT', 'Numerical Answer Type')
+    )
+    
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='Subject Paper')
+    question_type = models.CharField(max_length=3, choices=TYPE_CHOICES, default='MCQ')
     branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True)
     text = models.TextField(blank=True, null=True)
     image = models.TextField(blank=True, null=True)
     marks = models.IntegerField(default=1)
+    
+    # For NAT questions
+    nat_min = models.FloatField(blank=True, null=True)
+    nat_max = models.FloatField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self): 
-        return str(self.text)[:50]
+        return f"{self.question_type} - {str(self.text)[:50]}"
 
 class Choice(models.Model):
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='choices')
@@ -102,7 +113,16 @@ class MockTest(models.Model):
 class MockTestQuestion(models.Model):
     mock_test = models.ForeignKey(MockTest, on_delete=models.CASCADE, related_name='test_questions')
     question = models.ForeignKey(Question, on_delete=models.CASCADE)
-    selected_choice = models.ForeignKey(Choice, on_delete=models.SET_NULL, null=True, blank=True)
+    
+    # For MCQ
+    selected_choice = models.ForeignKey(Choice, on_delete=models.SET_NULL, null=True, blank=True, related_name='selected_in_mcq')
+    
+    # For MSQ (Many-to-Many to allow multiple selections)
+    selected_choices = models.ManyToManyField(Choice, blank=True, related_name='selected_in_msq')
+    
+    # For NAT
+    nat_answer = models.FloatField(blank=True, null=True)
+    
     is_correct = models.BooleanField(default=False)
     order = models.PositiveIntegerField(default=0)
 

@@ -373,7 +373,7 @@ class GenerateMockTestView(APIView):
                 is_completed=False
             )
 
-            # 5. Link Questions to Test (Bulk Create for Efficiency)
+            # 5. Link Questions to Test
             test_questions = []
             for index, q_id in enumerate(selected_ids):
                 test_questions.append(MockTestQuestion(
@@ -383,7 +383,6 @@ class GenerateMockTestView(APIView):
                 ))
             MockTestQuestion.objects.bulk_create(test_questions)
 
-            # 6. Return the Test Session Data (Hiding answers)
             return Response(MockTestSessionSerializer(mock_test).data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -400,33 +399,69 @@ class SubmitMockTestView(APIView):
         serializer = MockTestSubmitSerializer(data=request.data)
         if serializer.is_valid():
             total_score = 0.0
-            answers_map = {item['question_id']: item['choice_id'] for item in serializer.validated_data['answers']}
+            answers_map = {item['question_id']: item['answer'] for item in serializer.validated_data['answers']}
             test_questions = MockTestQuestion.objects.filter(mock_test=mock_test).select_related('question')
             
             for tq in test_questions:
-                if tq.question.id in answers_map:
-                    choice_id = answers_map[tq.question.id]
+                question = tq.question
+                q_type = question.question_type
+                user_answer = answers_map.get(question.id)
+
+                if user_answer is None:
+                    continue # Not attempted
+
+                if q_type == 'MCQ':
                     try:
-                        selected_choice = Choice.objects.get(id=choice_id, question=tq.question)
+                        selected_choice = Choice.objects.get(id=user_answer, question=question)
                         tq.selected_choice = selected_choice
                         
                         if selected_choice.is_correct:
                             tq.is_correct = True
-                            total_score += tq.question.marks
+                            total_score += question.marks
+                        else:
+                            tq.is_correct = False
+                            total_score -= (question.marks / 3.0)
                             
-                    except Choice.DoesNotExist:
+                    except (Choice.DoesNotExist, ValueError):
+                        pass
+
+                elif q_type == 'MSQ':
+                    if isinstance(user_answer, list):
+                        selected_ids = set(user_answer)
+                        correct_choice_ids = set(Choice.objects.filter(question=question, is_correct=True).values_list('id', flat=True))
+                        
+                        choices_to_add = Choice.objects.filter(id__in=selected_ids, question=question)
+                        tq.selected_choices.set(choices_to_add)
+
+                        if selected_ids == correct_choice_ids:
+                            tq.is_correct = True
+                            total_score += question.marks
+                        else:
+                            tq.is_correct = False
+
+                elif q_type == 'NAT':
+                    try:
+                        val = float(user_answer)
+                        tq.nat_answer = val
+                        if question.nat_min is not None and question.nat_max is not None:
+                            if question.nat_min <= val <= question.nat_max:
+                                tq.is_correct = True
+                                total_score += question.marks
+                            else:
+                                tq.is_correct = False
+                    except (ValueError, TypeError):
                         pass
                 
                 tq.save()
 
-            mock_test.score = total_score
+            mock_test.score = round(total_score, 2)
             mock_test.is_completed = True
             mock_test.completed_at = timezone.now()
             mock_test.save()
 
             return Response({
                 "message": "Test submitted successfully",
-                "score": total_score,
+                "score": mock_test.score,
                 "test_id": mock_test.id
             }, status=status.HTTP_200_OK)
 
@@ -435,14 +470,12 @@ class SubmitMockTestView(APIView):
 class StudentMockTestHistoryView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MockTestHistorySerializer
-
     def get_queryset(self):
         return MockTest.objects.filter(student=self.request.user).order_by('-created_at')
 
 class AdminStudentHistoryView(generics.ListAPIView):
     permission_classes = [permissions.IsAdminUser]
     serializer_class = MockTestHistorySerializer
-
     def get_queryset(self):
         student_id = self.kwargs['pk']
         return MockTest.objects.filter(student_id=student_id).order_by('-created_at')
@@ -451,7 +484,6 @@ class StudentMockTestAnalyticsView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MockTestResultSerializer
     queryset = MockTest.objects.all()
-
     def get_object(self):
         obj = super().get_object()
         if obj.student != self.request.user:

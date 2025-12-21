@@ -6,7 +6,7 @@ from .models import (
     Question, Choice, MockTest, MockTestQuestion
 )
 
-# --- AUTH & CORE SERIALIZERS (Unchanged from original) ---
+# --- AUTH & CORE SERIALIZERS (Unchanged) ---
 
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
@@ -73,39 +73,66 @@ class ChoiceSerializer(serializers.ModelSerializer):
     class Meta: model = Choice; fields = ['id', 'text', 'is_correct', 'image']
 
 class QuestionBankSerializer(serializers.ModelSerializer):
-    choices = ChoiceSerializer(many=True)
+    choices = ChoiceSerializer(many=True, required=False)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     
     class Meta:
         model = Question
-        fields = ['id', 'text', 'image', 'category', 'branch', 'branch_name', 'marks', 'choices']
+        fields = ['id', 'text', 'image', 'category', 'branch', 'branch_name', 'marks', 'question_type', 'nat_min', 'nat_max', 'choices']
     
     def validate(self, data):
         if not data.get('text') and not data.get('image'):
             raise serializers.ValidationError("Either text or image must be provided for the question.")
+        
+        q_type = data.get('question_type', 'MCQ')
+        choices_data = data.get('choices', [])
+
+        if q_type == 'NAT':
+            if data.get('nat_min') is None or data.get('nat_max') is None:
+                raise serializers.ValidationError("NAT questions must have a valid numerical range (min and max).")
+        else:
+            # Check validation for MCQ and MSQ
+            if not choices_data:
+                raise serializers.ValidationError("MCQ and MSQ questions must have choices.")
+            
+            correct_count = sum(1 for c in choices_data if c.get('is_correct'))
+            if q_type == 'MCQ' and correct_count != 1:
+                raise serializers.ValidationError("MCQ must have exactly one correct answer.")
+            if q_type == 'MSQ' and correct_count < 1:
+                raise serializers.ValidationError("MSQ must have at least one correct answer.")
+
         return data
 
     def create(self, validated_data):
-        choices_data = validated_data.pop('choices')
+        choices_data = validated_data.pop('choices', [])
         question = Question.objects.create(**validated_data)
-        for choice_data in choices_data:
-            if not choice_data.get('text') and not choice_data.get('image'):
-                raise serializers.ValidationError("Either text or image must be provided for all choices.")
-            Choice.objects.create(question=question, **choice_data)
+        
+        if question.question_type != 'NAT':
+            for choice_data in choices_data:
+                if not choice_data.get('text') and not choice_data.get('image'):
+                    raise serializers.ValidationError("Either text or image must be provided for all choices.")
+                Choice.objects.create(question=question, **choice_data)
         return question
 
     def update(self, instance, validated_data):
         instance.text = validated_data.get('text', instance.text)
+        instance.image = validated_data.get('image', instance.image)
         instance.category = validated_data.get('category', instance.category)
         instance.branch = validated_data.get('branch', instance.branch)
         instance.marks = validated_data.get('marks', instance.marks)
+        instance.question_type = validated_data.get('question_type', instance.question_type)
+        instance.nat_min = validated_data.get('nat_min', instance.nat_min)
+        instance.nat_max = validated_data.get('nat_max', instance.nat_max)
         instance.save()
 
-        if 'choices' in validated_data:
+        if instance.question_type != 'NAT' and 'choices' in validated_data:
             choices_data = validated_data.pop('choices')
             instance.choices.all().delete()
             for choice_data in choices_data:
                 Choice.objects.create(question=instance, **choice_data)
+        elif instance.question_type == 'NAT':
+            instance.choices.all().delete()
+            
         return instance
 
 # --- MOCK TEST SERIALIZERS (STUDENT) ---
@@ -124,12 +151,13 @@ class MockTestQuestionSerializer(serializers.ModelSerializer):
     question_text = serializers.CharField(source='question.text', read_only=True)
     question_image = serializers.CharField(source='question.image', read_only=True)
     question_id = serializers.IntegerField(source='question.id', read_only=True)
+    question_type = serializers.CharField(source='question.question_type', read_only=True)
     marks = serializers.IntegerField(source='question.marks', read_only=True)
     choices = StudentChoiceSerializer(source='question.choices', many=True, read_only=True)
     
     class Meta:
         model = MockTestQuestion
-        fields = ['id', 'question_id', 'question_text', 'question_image', 'marks', 'choices', 'order']
+        fields = ['id', 'question_id', 'question_text', 'question_image', 'question_type', 'marks', 'choices', 'order']
 
 class MockTestSessionSerializer(serializers.ModelSerializer):
     questions = MockTestQuestionSerializer(source='test_questions', many=True, read_only=True)
@@ -140,22 +168,23 @@ class MockTestSessionSerializer(serializers.ModelSerializer):
 
 class AnswerSubmissionSerializer(serializers.Serializer):
     question_id = serializers.IntegerField()
-    choice_id = serializers.IntegerField()
+    answer = serializers.JSONField()
 
 class MockTestSubmitSerializer(serializers.Serializer):
     answers = serializers.ListField(child=AnswerSubmissionSerializer())
 
 class QuestionReviewSerializer(serializers.ModelSerializer):
     choices = ChoiceSerializer(many=True, read_only=True)
-    class Meta: model = Question; fields = ['id', 'text', 'image', 'choices', 'marks', 'category']
+    class Meta: model = Question; fields = ['id', 'text', 'image', 'choices', 'marks', 'category', 'question_type', 'nat_min', 'nat_max']
 
 class MockTestQuestionReviewSerializer(serializers.ModelSerializer):
     question = QuestionReviewSerializer(read_only=True)
     selected_choice = ChoiceSerializer(read_only=True)
+    selected_choices = ChoiceSerializer(many=True, read_only=True)
     
     class Meta:
         model = MockTestQuestion
-        fields = ['id', 'question', 'selected_choice', 'is_correct']
+        fields = ['id', 'question', 'selected_choice', 'selected_choices', 'nat_answer', 'is_correct']
 
 class MockTestResultSerializer(serializers.ModelSerializer):
     questions = MockTestQuestionReviewSerializer(source='test_questions', many=True, read_only=True)
@@ -176,7 +205,6 @@ class MockTestResultSerializer(serializers.ModelSerializer):
                 if tq.is_correct:
                     analysis[cat_name]['correct'] += 1
             except Exception:
-                # Skip questions that have been deleted or are corrupted
                 continue
         return analysis
 
@@ -193,6 +221,5 @@ class MockTestHistorySerializer(serializers.ModelSerializer):
             try:
                 total += tq.question.marks
             except Exception:
-                # If question is deleted, assume 0 marks or skip
                 continue
         return total

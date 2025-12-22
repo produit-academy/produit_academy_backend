@@ -28,10 +28,18 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True)
+    course_request_status = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'branch_name', 'college', 'phone_number')
+        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'branch_name', 'college', 'phone_number', 'is_active', 'course_request_status')
         extra_kwargs = {'password': {'write_only': True}}
+    
+    def get_course_request_status(self, obj):
+        # Fetch the latest course request for this user
+        req = CourseRequest.objects.filter(student=obj).last()
+        return req.status if req else None
+
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
         user.is_active = False 

@@ -284,6 +284,13 @@ class CourseRequestUpdateView(generics.UpdateAPIView):
     queryset = CourseRequest.objects.all()
     serializer_class = CourseRequestSerializer
 
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        if instance.status == 'Approved':
+            student = instance.student
+            student.is_active = True
+            student.save()
+
 class StudyMaterialView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = StudyMaterialSerializer

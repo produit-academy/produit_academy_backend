@@ -17,7 +17,7 @@ class SingleSessionJWTAuthentication(JWTAuthentication):
         user = self.get_user(validated_token)
         
         # --- SINGLE SESSION ENFORCEMENT ---
-        if user.role == 'student':
+        if user.role == 'student' and not user.is_staff and not user.is_superuser:
             try:
                 active_session = Session.objects.get(user=user)
                 token_str = raw_token.decode('utf-8') if isinstance(raw_token, bytes) else str(raw_token)

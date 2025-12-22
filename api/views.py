@@ -121,7 +121,7 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 user = serializer.user
                 
                 # Single Session Enforcement (STUDENTS ONLY)
-                if user.role == 'student':
+                if user.role == 'student' and not user.is_staff and not user.is_superuser:
                     Session.objects.filter(user=user).delete()
                     session_key = response.data.get('access')
                     if session_key:

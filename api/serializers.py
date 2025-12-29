@@ -189,10 +189,21 @@ class MockTestQuestionReviewSerializer(serializers.ModelSerializer):
     question = QuestionReviewSerializer(read_only=True)
     selected_choice = ChoiceSerializer(read_only=True)
     selected_choices = ChoiceSerializer(many=True, read_only=True)
+    awarded_marks = serializers.SerializerMethodField()
     
     class Meta:
         model = MockTestQuestion
-        fields = ['id', 'question', 'selected_choice', 'selected_choices', 'nat_answer', 'is_correct']
+        fields = ['id', 'question', 'selected_choice', 'selected_choices', 'nat_answer', 'is_correct', 'awarded_marks']
+
+    def get_awarded_marks(self, obj):
+        if obj.is_correct:
+            return obj.question.marks
+        
+        # Negative marking for wrong MCQ attempts (only if attempted)
+        if obj.question.question_type == 'MCQ' and obj.selected_choice is not None:
+             return round(-(obj.question.marks / 3.0), 2)
+        
+        return 0.0
 
 class MockTestResultSerializer(serializers.ModelSerializer):
     questions = MockTestQuestionReviewSerializer(source='test_questions', many=True, read_only=True)

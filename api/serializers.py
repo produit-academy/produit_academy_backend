@@ -21,9 +21,24 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        # Manually check for inactive user (unverified) *before* standard auth fails
+        email = attrs.get('email') or attrs.get('username')
+        password = attrs.get('password')
+
+        if email and password:
+            user = User.objects.filter(email=email).first()
+            if user:
+                # Check password manually to distinguish between "Wrong Password" and "Inactive"
+                if user.check_password(password):
+                    if not user.is_active:
+                         raise AuthenticationFailed('Account is inactive.')
+
         data = super().validate(attrs)
+        
+        # Double check (though usually caught above)
         if not self.user.is_active:
             raise AuthenticationFailed('Account is inactive.')
+            
         return data
 
 class UserSerializer(serializers.ModelSerializer):

@@ -242,7 +242,7 @@ class StudentDashboardView(generics.RetrieveAPIView):
 
 class AdminDashboardView(generics.ListAPIView):
     permission_classes = [permissions.IsAdminUser]
-    queryset = CourseRequest.objects.filter(status='Pending')
+    queryset = CourseRequest.objects.filter(status='Pending', student__is_verified=True)
     serializer_class = CourseRequestSerializer
 
 class BranchListView(generics.ListAPIView):

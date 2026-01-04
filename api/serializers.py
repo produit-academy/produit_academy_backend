@@ -166,6 +166,7 @@ class MockTestGeneratorSerializer(serializers.Serializer):
     number_of_questions = serializers.IntegerField(min_value=1, max_value=100, default=10)
     time_limit_minutes = serializers.IntegerField(min_value=5, max_value=180, default=30)
     allow_repeats = serializers.BooleanField(default=True)
+    question_types = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
 
 class StudentChoiceSerializer(serializers.ModelSerializer):
     class Meta: model = Choice; fields = ['id', 'text', 'image']

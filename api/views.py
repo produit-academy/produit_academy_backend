@@ -323,10 +323,18 @@ class MaterialFileView(APIView):
 
 # --- ADMIN: QUESTION BANK & CATEGORY MANAGEMENT ---
 
+from rest_framework.pagination import PageNumberPagination
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
 class AdminQuestionBankView(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]
-    queryset = Question.objects.all().order_by('-created_at')
+    queryset = Question.objects.all().select_related('branch').prefetch_related('choices').order_by('-created_at')
     serializer_class = QuestionBankSerializer
+    pagination_class = StandardResultsSetPagination
 
 # --- STUDENT: CUSTOM MOCK TEST SYSTEM ---
 
@@ -351,6 +359,10 @@ class GenerateMockTestView(APIView):
 
             if categories:
                 questions_query = questions_query.filter(category__in=categories)
+
+            question_types = serializer.validated_data.get('question_types')
+            if question_types:
+                questions_query = questions_query.filter(question_type__in=question_types)
             
             if not allow_repeats:
                 attempted_q_ids = MockTestQuestion.objects.filter(

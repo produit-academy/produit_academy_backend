@@ -272,7 +272,7 @@ class ProfileView(generics.RetrieveUpdateAPIView):
 
 class StudentListView(generics.ListAPIView):
     permission_classes = [permissions.IsAdminUser]
-    queryset = User.objects.filter(role='student')
+    queryset = User.objects.filter(role='student', is_active=True)
     serializer_class = UserSerializer
 
 class StudentManageView(generics.RetrieveUpdateDestroyAPIView):

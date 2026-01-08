@@ -35,6 +35,9 @@ def send_html_email(subject, recipient_email, username, otp, type='reset'):
     elif type == 'signup':
         title = "Welcome to Produit Academy!"
         intro = "Thank you for signing up. Please verify your email address to get started."
+    elif type == 'approval':
+        title = "Course Request Approved!"
+        intro = "Congratulations! Your request to join the course has been approved."
     else: # resend
         title = "New OTP Request"
         intro = "We received a request to resend your verification code."
@@ -42,14 +45,25 @@ def send_html_email(subject, recipient_email, username, otp, type='reset'):
 
     logo_url = "https://produit-academy-frontend.vercel.app/logo.png"
     
-    message_body = f"""
+    if type == 'approval':
+        message_body = f"""
                 <p>Hi <strong>{username}</strong>,</p>
                 <p>{intro}</p>
-                <p>Your One-Time Password (OTP) is:</p>
-                <div class="otp-box">{otp}</div>
-                <p>This OTP will expire in 10 minutes for security reasons.</p>
-                <p>If you did not request this, please ignore this email or contact support.</p>
-    """
+                <p>You can now log in and access your dashboard to start learning.</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="https://produit-academy-frontend.vercel.app/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Login to Dashboard</a>
+                </div>
+                <p>Good luck with your studies!</p>
+        """
+    else:
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>{intro}</p>
+                    <p>Your One-Time Password (OTP) is:</p>
+                    <div class="otp-box">{otp}</div>
+                    <p>This OTP will expire in 10 minutes for security reasons.</p>
+                    <p>If you did not request this, please ignore this email or contact support.</p>
+        """
 
     html_content = f"""
     <!DOCTYPE html>
@@ -290,6 +304,18 @@ class CourseRequestUpdateView(generics.UpdateAPIView):
             student = instance.student
             student.is_active = True
             student.save()
+            
+            # Send Approval Email
+            try:
+                send_html_email(
+                    subject="Course Request Approved - Produit Academy",
+                    recipient_email=student.email,
+                    username=student.username,
+                    otp=None, # Not needed for approval
+                    type='approval'
+                )
+            except Exception as e:
+                print(f"Failed to send approval email: {e}")
 
 class StudyMaterialView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]

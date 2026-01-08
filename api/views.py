@@ -15,7 +15,7 @@ from rest_framework.exceptions import PermissionDenied
 
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
-    Question, Choice, MockTest, MockTestQuestion
+    Question, Choice, MockTest, MockTestQuestion, Complaint
 )
 from .serializers import (
     UserSerializer, CourseRequestSerializer, StudyMaterialSerializer,
@@ -23,7 +23,7 @@ from .serializers import (
     UserProfileSerializer,
     QuestionBankSerializer, MockTestGeneratorSerializer,
     MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSerializer,
-    MockTestHistorySerializer
+    MockTestHistorySerializer, ComplaintSerializer
 )
 
 # --- EMAIL HELPER FUNCTION ---
@@ -510,3 +510,31 @@ class StudentMockTestAnalyticsView(generics.RetrieveAPIView):
         if not obj.is_completed:
             raise PermissionDenied("You must complete the test to view analytics.")
         return obj
+
+# --- COMPLAINT SYSTEM VIEWS ---
+
+class StudentComplaintView(generics.ListCreateAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ComplaintSerializer
+
+    def get_queryset(self):
+        return Complaint.objects.filter(student=self.request.user).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save(student=self.request.user)
+
+class AdminComplaintDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = ComplaintSerializer
+    queryset = Complaint.objects.all()
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        if instance.status == 'Resolved' and not instance.resolved_at:
+            instance.resolved_at = timezone.now()
+            instance.save()
+
+class AdminComplaintListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = ComplaintSerializer
+    queryset = Complaint.objects.all().order_by('-created_at')

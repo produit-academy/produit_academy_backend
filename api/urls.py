@@ -38,6 +38,9 @@ urlpatterns = [
     path('admin/students/<int:pk>/', StudentManageView.as_view(), name='student-manage'),
     path('admin/students/<int:pk>/history/', AdminStudentHistoryView.as_view(), name='admin-student-history'),
     path('courserequests/<int:pk>/update/', CourseRequestUpdateView.as_view(), name='course-request-update'),
+    path('student/complaints/', StudentComplaintView.as_view(), name='student-complaints'),
+    path('admin/complaints/', AdminComplaintListView.as_view(), name='admin-complaints-list'),
+    path('admin/complaints/<int:pk>/', AdminComplaintDetailView.as_view(), name='admin-complaints-detail'),
 ]
 
 

@@ -128,3 +128,18 @@ class MockTestQuestion(models.Model):
 
     class Meta:
         unique_together = ('mock_test', 'question')
+
+# --- COMPLAINT SYSTEM MODELS ---
+
+class Complaint(models.Model):
+    STATUS_CHOICES = (('Pending', 'Pending'), ('Resolved', 'Resolved'))
+    student = models.ForeignKey(User, on_delete=models.CASCADE)
+    subject = models.CharField(max_length=200)
+    description = models.TextField()
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending')
+    resolution_comment = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.subject} - {self.student.username}"

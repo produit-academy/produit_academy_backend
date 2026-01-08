@@ -3,7 +3,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
-    Question, Choice, MockTest, MockTestQuestion
+    Question, Choice, MockTest, MockTestQuestion, Complaint
 )
 
 # --- AUTH & CORE SERIALIZERS (Unchanged) ---
@@ -167,6 +167,13 @@ class MockTestGeneratorSerializer(serializers.Serializer):
     time_limit_minutes = serializers.IntegerField(min_value=5, max_value=180, default=30)
     allow_repeats = serializers.BooleanField(default=True)
     question_types = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
+
+class ComplaintSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.username', read_only=True)
+    class Meta:
+        model = Complaint
+        fields = ['id', 'student', 'student_name', 'subject', 'description', 'status', 'resolution_comment', 'created_at', 'resolved_at']
+        read_only_fields = ['student', 'created_at', 'resolved_at']
 
 class StudentChoiceSerializer(serializers.ModelSerializer):
     class Meta: model = Choice; fields = ['id', 'text', 'image']

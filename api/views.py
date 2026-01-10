@@ -279,9 +279,6 @@ class StudentManageView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAdminUser]
     queryset = User.objects.all()
     serializer_class = UserSerializer
-    def perform_destroy(self, instance):
-        instance.is_active = False
-        instance.save()
 
 # --- COURSE & MATERIALS ---
 

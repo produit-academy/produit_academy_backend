@@ -15,7 +15,7 @@ from rest_framework.exceptions import PermissionDenied
 
 from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session, 
-    Question, Choice, MockTest, MockTestQuestion, Complaint
+    Question, Choice, MockTest, MockTestQuestion, Complaint, ContactInquiry
 )
 from .serializers import (
     UserSerializer, CourseRequestSerializer, StudyMaterialSerializer,
@@ -23,7 +23,7 @@ from .serializers import (
     UserProfileSerializer,
     QuestionBankSerializer, MockTestGeneratorSerializer,
     MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSerializer,
-    MockTestHistorySerializer, ComplaintSerializer
+    MockTestHistorySerializer, ComplaintSerializer, ContactInquirySerializer
 )
 
 # --- EMAIL HELPER FUNCTION ---
@@ -561,3 +561,18 @@ class AdminComplaintListView(generics.ListAPIView):
     permission_classes = [permissions.IsAdminUser]
     serializer_class = ComplaintSerializer
     queryset = Complaint.objects.all().order_by('-created_at')
+
+class ContactInquiryView(generics.CreateAPIView):
+    permission_classes = [permissions.AllowAny]
+    queryset = ContactInquiry.objects.all()
+    serializer_class = ContactInquirySerializer
+
+class AdminContactListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAdminUser]
+    queryset = ContactInquiry.objects.all().order_by('-created_at')
+    serializer_class = ContactInquirySerializer
+
+class AdminContactUpdateView(generics.UpdateAPIView):
+    permission_classes = [permissions.IsAdminUser]
+    queryset = ContactInquiry.objects.all()
+    serializer_class = ContactInquirySerializer

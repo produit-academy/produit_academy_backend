@@ -143,3 +143,16 @@ class Complaint(models.Model):
 
     def __str__(self):
         return f"{self.subject} - {self.student.username}"
+
+class ContactInquiry(models.Model):
+    name = models.CharField(max_length=100)
+    email = models.EmailField()
+    phone = models.CharField(max_length=15)
+    course = models.CharField(max_length=100) # This will store the Exam Category
+    message = models.TextField()
+    status = models.CharField(max_length=20, choices=(('Pending', 'Pending'), ('Resolved', 'Resolved')), default='Pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} - {self.course}"
+

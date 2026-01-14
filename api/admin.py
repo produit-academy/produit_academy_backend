@@ -1,8 +1,7 @@
 from django.contrib import admin
-from .models import (
-    User, Branch, StudyMaterial, CourseRequest, Session,
-    Question, Choice, MockTest, MockTestQuestion
-)
+from .models import User, Branch, StudyMaterial, CourseRequest, Session
+from .models import Question, Choice, MockTest, MockTestQuestion
+from .models import ContactInquiry
 
 # --- INLINES ---
 
@@ -70,3 +69,9 @@ class MockTestAdmin(admin.ModelAdmin):
 @admin.register(Session)
 class SessionAdmin(admin.ModelAdmin):
     list_display = ('user', 'created_at')
+
+@admin.register(ContactInquiry)
+class ContactInquiryAdmin(admin.ModelAdmin):
+    list_display = ('name', 'email', 'course', 'created_at')
+    list_filter = ('course', 'created_at')
+    search_fields = ('name', 'email', 'message')

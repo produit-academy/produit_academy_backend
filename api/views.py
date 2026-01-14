@@ -393,37 +393,73 @@ class GenerateMockTestView(APIView):
                 ).values_list('question_id', flat=True)
                 questions_query = questions_query.exclude(id__in=attempted_q_ids)
 
-            # 3. Random Selection
-            available_ids = list(questions_query.values_list('id', flat=True))
+            # 3. Weighted Selection Logic
+            import random
             
-            if len(available_ids) < num_questions:
+            selected_ids = []
+            
+            # Check if we should apply the standard pattern (GA: 15%, Math: 15%, Core: 70%)
+            # Apply if:
+            # 1. No specific categories selected (Standard Test)
+            # 2. All 3 categories are explicitly selected
+            all_categories = {'General Aptitude', 'Engineering Mathematics', 'Subject Paper'}
+            is_standard_selection = not categories or set(categories) == all_categories
+            
+            if is_standard_selection:
+                count_ga = int(num_questions * 0.15)
+                count_math = int(num_questions * 0.15)
+                count_core = num_questions - count_ga - count_math
+                
+                def get_category_ids(cat_name, target_count):
+                    # We must use the base query (filtered by branch/type/repeats) but enforce category
+                    cat_query = questions_query.filter(category=cat_name)
+                    ids = list(cat_query.values_list('id', flat=True))
+                    return random.sample(ids, min(len(ids), target_count))
+
+                ids_ga = get_category_ids('General Aptitude', count_ga)
+                ids_math = get_category_ids('Engineering Mathematics', count_math)
+                ids_core = get_category_ids('Subject Paper', count_core)
+                
+                selected_ids = ids_ga + ids_math + ids_core
+                
+                # Fill remaining if any category was short on questions
+                if len(selected_ids) < num_questions:
+                    current_set = set(selected_ids)
+                    remaining_needed = num_questions - len(selected_ids)
+                    remaining_pool = list(questions_query.exclude(id__in=current_set).values_list('id', flat=True))
+                    if len(remaining_pool) >= remaining_needed:
+                        selected_ids += random.sample(remaining_pool, remaining_needed)
+                    else:
+                        selected_ids += remaining_pool 
+            else:
+                # Randomly select from the filtered pool (User selected 1 or 2 specific categories)
+                available_ids = list(questions_query.values_list('id', flat=True))
+                if len(available_ids) >= num_questions:
+                    selected_ids = random.sample(available_ids, num_questions)
+                else:
+                    selected_ids = available_ids
+
+            if len(selected_ids) == 0:
                 return Response(
-                    {
-                        "error": f"Not enough questions available matching criteria. Found {len(available_ids)}, requested {num_questions}.",
-                        "available_count": len(available_ids)
-                    },
+                    {"error": "No questions available matching your criteria."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            selected_ids = random.sample(available_ids, num_questions)
-            
-            # 4. Create Mock Test Session
+            # 4. Create Mock Test
             mock_test = MockTest.objects.create(
                 student=request.user,
-                total_questions=num_questions,
-                time_limit_minutes=time_limit,
-                is_completed=False
+                total_questions=len(selected_ids),
+                time_limit_minutes=time_limit
             )
 
-            # 5. Link Questions to Test
-            test_questions = []
-            for index, q_id in enumerate(selected_ids):
-                test_questions.append(MockTestQuestion(
+            mock_questions = []
+            for q_id in selected_ids:
+                mock_questions.append(MockTestQuestion(
                     mock_test=mock_test,
-                    question_id=q_id,
-                    order=index + 1
+                    question_id=q_id
                 ))
-            MockTestQuestion.objects.bulk_create(test_questions)
+            
+            MockTestQuestion.objects.bulk_create(mock_questions)
 
             return Response(MockTestSessionSerializer(mock_test).data, status=status.HTTP_201_CREATED)
 

@@ -48,7 +48,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'branch_name', 'college', 'phone_number', 'is_active', 'course_request_status')
+        fields = ('id', 'username', 'email', 'password', 'role', 'student_id', 'branch', 'branch_name', 'college', 'phone_number', 'is_active', 'course_request_status', 'date_joined')
         extra_kwargs = {'password': {'write_only': True}}
     
     def get_course_request_status(self, obj):

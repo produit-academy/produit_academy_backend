@@ -51,7 +51,7 @@ def send_html_email(subject, recipient_email, username, otp, type='reset'):
                 <p>{intro}</p>
                 <p>You can now log in and access your dashboard to start learning.</p>
                 <div style="text-align: center; margin: 30px 0;">
-                    <a href="https://produit-academy-frontend.vercel.app/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Login to Dashboard</a>
+                    <a href="https://gate.produitacademy.com/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Login to Dashboard</a>
                 </div>
                 <p>Good luck with your studies!</p>
         """

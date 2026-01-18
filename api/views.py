@@ -406,31 +406,76 @@ class GenerateMockTestView(APIView):
             is_standard_selection = not categories or set(categories) == all_categories
             
             if is_standard_selection:
-                count_ga = int(num_questions * 0.15)
-                count_math = int(num_questions * 0.15)
-                count_core = num_questions - count_ga - count_math
-                
-                def get_category_ids(cat_name, target_count):
-                    # We must use the base query (filtered by branch/type/repeats) but enforce category
-                    cat_query = questions_query.filter(category=cat_name)
-                    ids = list(cat_query.values_list('id', flat=True))
-                    return random.sample(ids, min(len(ids), target_count))
+                if num_questions == 65:
+                    # --- STRICT GATE PATTERN (100 Marks) ---
+                    # GA: 5x1 + 5x2 = 15 Marks
+                    # Math: 5x1 + 5x2 = 15 Marks
+                    # Core: 20x1 + 25x2 = 70 Marks
+                    
+                    def get_exact_marks_ids(cat_name, target_1_mark, target_2_mark):
+                        cat_query = questions_query.filter(category=cat_name)
+                        
+                        ids_1 = list(cat_query.filter(marks=1).values_list('id', flat=True))
+                        ids_2 = list(cat_query.filter(marks=2).values_list('id', flat=True))
+                        
+                        selected = []
+                        # Try to get exact amounts, attempt fallback if not enough
+                        if len(ids_1) >= target_1_mark:
+                            selected += random.sample(ids_1, target_1_mark)
+                        else:
+                            selected += ids_1 # Take all available
+                            
+                        if len(ids_2) >= target_2_mark:
+                            selected += random.sample(ids_2, target_2_mark)
+                        else:
+                            selected += ids_2 # Take all available
+                            
+                        return selected
 
-                ids_ga = get_category_ids('General Aptitude', count_ga)
-                ids_math = get_category_ids('Engineering Mathematics', count_math)
-                ids_core = get_category_ids('Subject Paper', count_core)
-                
-                selected_ids = ids_ga + ids_math + ids_core
-                
-                # Fill remaining if any category was short on questions
-                if len(selected_ids) < num_questions:
-                    current_set = set(selected_ids)
-                    remaining_needed = num_questions - len(selected_ids)
-                    remaining_pool = list(questions_query.exclude(id__in=current_set).values_list('id', flat=True))
-                    if len(remaining_pool) >= remaining_needed:
-                        selected_ids += random.sample(remaining_pool, remaining_needed)
-                    else:
-                        selected_ids += remaining_pool 
+                    ids_ga = get_exact_marks_ids('General Aptitude', 5, 5)
+                    ids_math = get_exact_marks_ids('Engineering Mathematics', 5, 5)
+                    ids_core = get_exact_marks_ids('Subject Paper', 20, 25)
+                    
+                    selected_ids = ids_ga + ids_math + ids_core
+                    
+                    # Fill if short (due to lack of specific mark Qs)
+                    if len(selected_ids) < num_questions:
+                         current_set = set(selected_ids)
+                         remaining_needed = num_questions - len(selected_ids)
+                         # Fallback pool: Any question from these categories not yet selected
+                         remaining_pool = list(questions_query.exclude(id__in=current_set).values_list('id', flat=True))
+                         if len(remaining_pool) >= remaining_needed:
+                             selected_ids += random.sample(remaining_pool, remaining_needed)
+                         else:
+                             selected_ids += remaining_pool
+
+                else:
+                    # --- STANDARD PERCENTAGE DISTRIBUTION (Custom N) ---
+                    count_ga = int(num_questions * 0.15)
+                    count_math = int(num_questions * 0.15)
+                    count_core = num_questions - count_ga - count_math
+                    
+                    def get_category_ids(cat_name, target_count):
+                        # We must use the base query (filtered by branch/type/repeats) but enforce category
+                        cat_query = questions_query.filter(category=cat_name)
+                        ids = list(cat_query.values_list('id', flat=True))
+                        return random.sample(ids, min(len(ids), target_count))
+
+                    ids_ga = get_category_ids('General Aptitude', count_ga)
+                    ids_math = get_category_ids('Engineering Mathematics', count_math)
+                    ids_core = get_category_ids('Subject Paper', count_core)
+                    
+                    selected_ids = ids_ga + ids_math + ids_core
+                    
+                    # Fill remaining if any category was short on questions
+                    if len(selected_ids) < num_questions:
+                        current_set = set(selected_ids)
+                        remaining_needed = num_questions - len(selected_ids)
+                        remaining_pool = list(questions_query.exclude(id__in=current_set).values_list('id', flat=True))
+                        if len(remaining_pool) >= remaining_needed:
+                            selected_ids += random.sample(remaining_pool, remaining_needed)
+                        else:
+                            selected_ids += remaining_pool
             else:
                 # Randomly select from the filtered pool (User selected 1 or 2 specific categories)
                 available_ids = list(questions_query.values_list('id', flat=True))

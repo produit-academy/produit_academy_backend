@@ -164,8 +164,8 @@ class QuestionBankSerializer(serializers.ModelSerializer):
 class MockTestGeneratorSerializer(serializers.Serializer):
     branch_id = serializers.IntegerField(required=False, allow_null=True)
     categories = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
-    number_of_questions = serializers.IntegerField(min_value=1, max_value=100, default=10)
-    time_limit_minutes = serializers.IntegerField(min_value=5, max_value=180, default=30)
+    number_of_questions = serializers.IntegerField(min_value=1, max_value=100, default=65)
+    time_limit_minutes = serializers.IntegerField(min_value=5, max_value=180, default=180)
     allow_repeats = serializers.BooleanField(default=True)
     question_types = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
 

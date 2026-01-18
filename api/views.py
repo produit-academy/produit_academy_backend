@@ -22,8 +22,9 @@ from .serializers import (
     MyTokenObtainPairSerializer, BranchSerializer, ChangePasswordSerializer,
     UserProfileSerializer,
     QuestionBankSerializer, MockTestGeneratorSerializer,
-    MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSerializer,
-    MockTestHistorySerializer, ComplaintSerializer, ContactInquirySerializer
+    MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSummarySerializer,
+    MockTestHistorySerializer, ComplaintSerializer, ContactInquirySerializer,
+    MockTestQuestionReviewSerializer
 )
 
 # --- EMAIL HELPER FUNCTION ---
@@ -406,43 +407,66 @@ class GenerateMockTestView(APIView):
             is_standard_selection = not categories or set(categories) == all_categories
             
             if is_standard_selection:
+                # Determine Branch Specific Logic
+                is_architecture = False
+                if branch_id:
+                    try:
+                        branch_obj = Branch.objects.get(id=branch_id)
+                        if "Architecture" in branch_obj.name:
+                            is_architecture = True
+                    except Branch.DoesNotExist:
+                        pass
+                
                 if num_questions == 65:
-                    # --- STRICT GATE PATTERN (100 Marks) ---
-                    # GA: 5x1 + 5x2 = 15 Marks
-                    # Math: 5x1 + 5x2 = 15 Marks
-                    # Core: 20x1 + 25x2 = 70 Marks
-                    
-                    def get_exact_marks_ids(cat_name, target_1_mark, target_2_mark):
-                        cat_query = questions_query.filter(category=cat_name)
+                    if is_architecture:
+                        # --- ARCHITECTURE GATE PATTERN (100 Marks, No Math) ---
+                        # GA: 5x1 + 5x2 = 15 Marks (10 Qs)
+                        # Core: 25x1 + 30x2 = 85 Marks (55 Qs)
+                        # Total: 10 + 55 = 65 Qs | 15 + 85 = 100 Marks
                         
-                        ids_1 = list(cat_query.filter(marks=1).values_list('id', flat=True))
-                        ids_2 = list(cat_query.filter(marks=2).values_list('id', flat=True))
-                        
-                        selected = []
-                        # Try to get exact amounts, attempt fallback if not enough
-                        if len(ids_1) >= target_1_mark:
-                            selected += random.sample(ids_1, target_1_mark)
-                        else:
-                            selected += ids_1 # Take all available
-                            
-                        if len(ids_2) >= target_2_mark:
-                            selected += random.sample(ids_2, target_2_mark)
-                        else:
-                            selected += ids_2 # Take all available
-                            
-                        return selected
+                        def get_exact_marks_ids(cat_name, target_1_mark, target_2_mark):
+                            cat_query = questions_query.filter(category=cat_name)
+                            ids_1 = list(cat_query.filter(marks=1).values_list('id', flat=True))
+                            ids_2 = list(cat_query.filter(marks=2).values_list('id', flat=True))
+                            selected = []
+                            if len(ids_1) >= target_1_mark: selected += random.sample(ids_1, target_1_mark)
+                            else: selected += ids_1
+                            if len(ids_2) >= target_2_mark: selected += random.sample(ids_2, target_2_mark)
+                            else: selected += ids_2
+                            return selected
 
-                    ids_ga = get_exact_marks_ids('General Aptitude', 5, 5)
-                    ids_math = get_exact_marks_ids('Engineering Mathematics', 5, 5)
-                    ids_core = get_exact_marks_ids('Subject Paper', 20, 25)
+                        ids_ga = get_exact_marks_ids('General Aptitude', 5, 5)
+                        ids_core = get_exact_marks_ids('Subject Paper', 25, 30)
+                        
+                        selected_ids = ids_ga + ids_core
+
+                    else:
+                        # --- STANDARD GATE PATTERN (100 Marks) ---
+                        # GA: 5x1 + 5x2 = 15 Marks
+                        # Math: 5x1 + 5x2 = 15 Marks
+                        # Core: 20x1 + 25x2 = 70 Marks
+                        
+                        def get_exact_marks_ids(cat_name, target_1_mark, target_2_mark):
+                            cat_query = questions_query.filter(category=cat_name)
+                            ids_1 = list(cat_query.filter(marks=1).values_list('id', flat=True))
+                            ids_2 = list(cat_query.filter(marks=2).values_list('id', flat=True))
+                            selected = []
+                            if len(ids_1) >= target_1_mark: selected += random.sample(ids_1, target_1_mark)
+                            else: selected += ids_1
+                            if len(ids_2) >= target_2_mark: selected += random.sample(ids_2, target_2_mark)
+                            else: selected += ids_2
+                            return selected
+
+                        ids_ga = get_exact_marks_ids('General Aptitude', 5, 5)
+                        ids_math = get_exact_marks_ids('Engineering Mathematics', 5, 5)
+                        ids_core = get_exact_marks_ids('Subject Paper', 20, 25)
+                        
+                        selected_ids = ids_ga + ids_math + ids_core
                     
-                    selected_ids = ids_ga + ids_math + ids_core
-                    
-                    # Fill if short (due to lack of specific mark Qs)
+                    # Fill if short
                     if len(selected_ids) < num_questions:
                          current_set = set(selected_ids)
                          remaining_needed = num_questions - len(selected_ids)
-                         # Fallback pool: Any question from these categories not yet selected
                          remaining_pool = list(questions_query.exclude(id__in=current_set).values_list('id', flat=True))
                          if len(remaining_pool) >= remaining_needed:
                              selected_ids += random.sample(remaining_pool, remaining_needed)
@@ -450,13 +474,20 @@ class GenerateMockTestView(APIView):
                              selected_ids += remaining_pool
 
                 else:
-                    # --- STANDARD PERCENTAGE DISTRIBUTION (Custom N) ---
-                    count_ga = int(num_questions * 0.15)
-                    count_math = int(num_questions * 0.15)
-                    count_core = num_questions - count_ga - count_math
+                    # --- PERCENTAGE DISTRIBUTION (Custom N) ---
+                    if is_architecture:
+                        # Architecture: 15% GA, 85% Core
+                        count_ga = int(num_questions * 0.15)
+                        count_math = 0
+                        count_core = num_questions - count_ga
+                    else:
+                        # Standard: 15% GA, 15% Math, 70% Core
+                        count_ga = int(num_questions * 0.15)
+                        count_math = int(num_questions * 0.15)
+                        count_core = num_questions - count_ga - count_math
                     
                     def get_category_ids(cat_name, target_count):
-                        # We must use the base query (filtered by branch/type/repeats) but enforce category
+                        if target_count <= 0: return []
                         cat_query = questions_query.filter(category=cat_name)
                         ids = list(cat_query.values_list('id', flat=True))
                         return random.sample(ids, min(len(ids), target_count))
@@ -467,7 +498,7 @@ class GenerateMockTestView(APIView):
                     
                     selected_ids = ids_ga + ids_math + ids_core
                     
-                    # Fill remaining if any category was short on questions
+                    # Fill remaining
                     if len(selected_ids) < num_questions:
                         current_set = set(selected_ids)
                         remaining_needed = num_questions - len(selected_ids)
@@ -605,7 +636,7 @@ class AdminStudentHistoryView(generics.ListAPIView):
 
 class StudentMockTestAnalyticsView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = MockTestResultSerializer
+    serializer_class = MockTestResultSummarySerializer
     queryset = MockTest.objects.all()
     def get_object(self):
         obj = super().get_object()
@@ -614,6 +645,24 @@ class StudentMockTestAnalyticsView(generics.RetrieveAPIView):
         if not obj.is_completed:
             raise PermissionDenied("You must complete the test to view analytics.")
         return obj
+
+class StudentMockTestQuestionsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = MockTestQuestionReviewSerializer
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        test_id = self.kwargs['pk']
+        
+        # Verify ownership and completion
+        try:
+            mock_test = MockTest.objects.get(pk=test_id, student=self.request.user)
+            if not mock_test.is_completed:
+                raise PermissionDenied("Test not completed.")
+        except MockTest.DoesNotExist:
+            raise Http404
+
+        return MockTestQuestion.objects.filter(mock_test_id=test_id).order_by('order').select_related('question', 'selected_choice').prefetch_related('question__choices', 'selected_choices')
 
 # --- COMPLAINT SYSTEM VIEWS ---
 

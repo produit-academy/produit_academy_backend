@@ -234,13 +234,12 @@ class MockTestQuestionReviewSerializer(serializers.ModelSerializer):
         
         return 0.0
 
-class MockTestResultSerializer(serializers.ModelSerializer):
-    questions = MockTestQuestionReviewSerializer(source='test_questions', many=True, read_only=True)
+class MockTestResultSummarySerializer(serializers.ModelSerializer):
     category_analysis = serializers.SerializerMethodField()
 
     class Meta:
         model = MockTest
-        fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'time_limit_minutes', 'questions', 'category_analysis']
+        fields = ['id', 'created_at', 'completed_at', 'score', 'total_questions', 'time_limit_minutes', 'category_analysis']
 
     def get_category_analysis(self, obj):
         analysis = {}

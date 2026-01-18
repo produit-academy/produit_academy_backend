@@ -31,6 +31,7 @@ urlpatterns = [
     path('student/tests/<int:pk>/submit/', SubmitMockTestView.as_view(), name='submit-test'),
     path('student/tests/history/', StudentMockTestHistoryView.as_view(), name='test-history'),
     path('student/tests/<int:pk>/analytics/', StudentMockTestAnalyticsView.as_view(), name='test-analytics'),
+    path('student/tests/<int:pk>/questions/', StudentMockTestQuestionsView.as_view(), name='test-questions-list'),
 
     # --- Admin User Management ---
     path('admin/dashboard/', AdminDashboardView.as_view(), name='admin_dashboard'),

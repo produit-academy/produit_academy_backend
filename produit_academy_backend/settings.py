@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     'corsheaders',
     # Local
     'api',
+    'careers',
 ]
 
 MIDDLEWARE = [

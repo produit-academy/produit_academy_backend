@@ -51,7 +51,7 @@ class AdminJobApplicationListView(generics.ListAPIView):
     queryset = JobApplication.objects.all().order_by('-created_at')
     serializer_class = JobApplicationSerializer
 
-class AdminJobApplicationDetailView(generics.RetrieveDestroyAPIView):
+class AdminJobApplicationDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAdminUser]
     queryset = JobApplication.objects.all()
     serializer_class = JobApplicationSerializer

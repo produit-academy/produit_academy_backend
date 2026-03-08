@@ -7,6 +7,7 @@ class JobApplication(models.Model):
     position = models.CharField(max_length=100)
     portfolio = models.URLField(blank=True, null=True)
     declaration = models.BooleanField(default=False)
+    interviewed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

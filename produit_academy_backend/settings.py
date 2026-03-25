@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     # Local
     'api',
     'careers',
+    'classes_app',
 ]
 
 MIDDLEWARE = [

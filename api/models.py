@@ -10,9 +10,11 @@ class Branch(models.Model):
         return self.name
 
 class User(AbstractUser):
-    ROLE_CHOICES = (('student', 'Student'), ('admin', 'Admin'))
+    ROLE_CHOICES = (('student', 'Student'), ('admin', 'Admin'), ('mentor', 'Mentor'), ('teacher', 'Teacher'))
+    PLATFORM_CHOICES = (('gate', 'GATE'), ('classes', 'Classes'))
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
+    platform = models.CharField(max_length=10, choices=PLATFORM_CHOICES, default='gate')
     student_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
     branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True)
     college = models.CharField(max_length=200, blank=True, null=True)

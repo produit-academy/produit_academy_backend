@@ -699,8 +699,14 @@ class ContactInquiryView(generics.CreateAPIView):
 
 class AdminContactListView(generics.ListAPIView):
     permission_classes = [permissions.IsAdminUser]
-    queryset = ContactInquiry.objects.all().order_by('-created_at')
     serializer_class = ContactInquirySerializer
+
+    def get_queryset(self):
+        queryset = ContactInquiry.objects.all().order_by('-created_at')
+        platform = self.request.query_params.get('platform')
+        if platform:
+            queryset = queryset.filter(platform=platform)
+        return queryset
 
 class AdminContactUpdateView(generics.UpdateAPIView):
     permission_classes = [permissions.IsAdminUser]

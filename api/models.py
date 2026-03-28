@@ -150,6 +150,7 @@ class ContactInquiry(models.Model):
     name = models.CharField(max_length=100)
     email = models.EmailField()
     phone = models.CharField(max_length=15)
+    platform = models.CharField(max_length=10, choices=[('gate', 'GATE'), ('classes', 'Classes')], default='gate')
     course = models.CharField(max_length=100) # This will store the Exam Category
     message = models.TextField()
     status = models.CharField(max_length=20, choices=(('Pending', 'Pending'), ('Resolved', 'Resolved')), default='Pending')

@@ -4,10 +4,9 @@ from .models import Course, Enrollment, ClassSession, AttendanceRecord
 
 @admin.register(Course)
 class CourseAdmin(admin.ModelAdmin):
-    list_display = ('name', 'mentor', 'is_active', 'created_at')
+    list_display = ('name', 'is_active', 'created_at')
     list_filter = ('is_active',)
     search_fields = ('name',)
-    filter_horizontal = ('teachers',)
 
 
 @admin.register(Enrollment)

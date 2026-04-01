@@ -19,6 +19,17 @@ class User(AbstractUser):
     branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True)
     college = models.CharField(max_length=200, blank=True, null=True)
     phone_number = models.CharField(max_length=15, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    current_class = models.CharField(max_length=50, blank=True, null=True)
+    school_name = models.CharField(max_length=200, blank=True, null=True)
+    assigned_mentor = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='mentored_students', limit_choices_to={'role': 'mentor'}
+    )
+    assigned_teacher = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='taught_students', limit_choices_to={'role': 'teacher'}
+    )
     is_verified = models.BooleanField(default=False)
     otp = models.CharField(max_length=6, blank=True, null=True) 
     otp_expiry = models.DateTimeField(blank=True, null=True)

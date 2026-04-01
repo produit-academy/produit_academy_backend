@@ -5,11 +5,6 @@ from api.models import User
 class Course(models.Model):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    mentor = models.ForeignKey(
-        User, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='mentored_courses'
-    )
-    teachers = models.ManyToManyField(User, related_name='teaching_courses', blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -21,6 +16,7 @@ class Enrollment(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='classes_enrollments')
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='enrollments')
     enrolled_at = models.DateTimeField(auto_now_add=True)
+    is_completed = models.BooleanField(default=False)
 
     class Meta:
         unique_together = ('student', 'course')

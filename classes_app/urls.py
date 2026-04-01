@@ -13,6 +13,13 @@ from .views import (
     AdminBulkEnrollView,
     AdminStatsView,
     AdminEnrollmentListView,
+    StudentStatsView,
+    MentorAtRiskView,
+    AdminStaffManagementView,
+    AdminAssignStaffView,
+    AdminStaffDetailView,
+    AdminStudentDetailView,
+    AdminEnrollmentToggleCompletionView,
 )
 
 urlpatterns = [
@@ -26,6 +33,8 @@ urlpatterns = [
     path('student/dashboard/', StudentDashboardView.as_view(), name='classes-student-dashboard'),
     path('teacher/dashboard/', TeacherDashboardView.as_view(), name='classes-teacher-dashboard'),
     path('mentor/dashboard/', MentorDashboardView.as_view(), name='classes-mentor-dashboard'),
+    path('student/stats/', StudentStatsView.as_view(), name='student-stats'),
+    path('mentor/at-risk/', MentorAtRiskView.as_view(), name='mentor-at-risk'),
 
     # Operations
     path('sessions/create/', SessionCreateView.as_view(), name='classes-session-create'),
@@ -33,6 +42,11 @@ urlpatterns = [
     path('sessions/<int:pk>/attendance/', BulkAttendanceView.as_view(), name='classes-session-attendance'),
 
     # Admin
+    path('admin/staff/', AdminStaffManagementView.as_view(), name='admin-staff-management'),
+    path('admin/staff/<int:pk>/', AdminStaffDetailView.as_view(), name='admin-staff-detail'),
+    path('admin/students/<int:pk>/', AdminStudentDetailView.as_view(), name='admin-student-detail'),
+    path('admin/enrollments/<int:pk>/toggle-completion/', AdminEnrollmentToggleCompletionView.as_view(), name='admin-enrollment-toggle-completion'),
+    path('admin/assign-staff/', AdminAssignStaffView.as_view(), name='admin-assign-staff'),
     path('admin/courses/', AdminCourseListCreateView.as_view(), name='classes-admin-courses'),
     path('admin/courses/<int:pk>/', AdminCourseDetailView.as_view(), name='classes-admin-course-detail'),
     path('admin/enrollments/', AdminBulkEnrollView.as_view(), name='classes-admin-enroll'),

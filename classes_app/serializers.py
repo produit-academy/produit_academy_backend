@@ -3,27 +3,12 @@ from api.models import User
 from .models import Course, Enrollment, ClassSession, AttendanceRecord
 
 
-class CourseTeacherSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ['id', 'username', 'email']
-
-
 class CourseSerializer(serializers.ModelSerializer):
-    mentor_name = serializers.CharField(source='mentor.username', read_only=True, default=None)
-    teacher_list = CourseTeacherSerializer(source='teachers', many=True, read_only=True)
     student_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Course
-        fields = [
-            'id', 'name', 'description', 'mentor', 'mentor_name',
-            'teachers', 'teacher_list', 'student_count', 'is_active', 'created_at'
-        ]
-        extra_kwargs = {
-            'teachers': {'write_only': True, 'required': False},
-            'mentor': {'required': False},
-        }
+        fields = ['id', 'name', 'description', 'student_count', 'is_active', 'created_at']
 
     def get_student_count(self, obj):
         return obj.enrollments.count()
@@ -33,10 +18,25 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.username', read_only=True)
     student_email = serializers.CharField(source='student.email', read_only=True)
     course_name = serializers.CharField(source='course.name', read_only=True)
+    mentor_name = serializers.SerializerMethodField()
+    teacher_name = serializers.SerializerMethodField()
+
+    student_active = serializers.BooleanField(source='student.is_active', read_only=True)
 
     class Meta:
         model = Enrollment
-        fields = ['id', 'student', 'student_name', 'student_email', 'course', 'course_name', 'enrolled_at']
+        fields = [
+            'id', 'student', 'student_name', 'student_email', 'student_active',
+            'course', 'course_name', 'mentor_name', 'teacher_name', 'enrolled_at', 'is_completed'
+        ]
+
+    def get_mentor_name(self, obj):
+        m = obj.student.assigned_mentor
+        return f"{m.first_name} {m.last_name}" if m else None
+
+    def get_teacher_name(self, obj):
+        t = obj.student.assigned_teacher
+        return f"{t.first_name} {t.last_name}" if t else None
 
 
 class ClassSessionSerializer(serializers.ModelSerializer):
@@ -81,7 +81,7 @@ class RosterStudentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'phone_number', 'existing_status']
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'phone_number', 'existing_status']
 
     def get_existing_status(self, obj):
         session_id = self.context.get('session_id')
@@ -113,36 +113,6 @@ class TeacherDashboardSerializer(serializers.Serializer):
     courses = CourseSerializer(many=True)
 
 
-class AtRiskStudentSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    username = serializers.CharField()
-    email = serializers.CharField()
-    phone_number = serializers.CharField(allow_null=True)
-    attendance_percentage = serializers.FloatField()
-    total_classes = serializers.IntegerField()
-    attended = serializers.IntegerField()
-    course_name = serializers.CharField()
-    course_id = serializers.IntegerField()
-
-
-class TeacherComplianceSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    username = serializers.CharField()
-    email = serializers.CharField()
-    total_sessions = serializers.IntegerField()
-    attendance_marked = serializers.IntegerField()
-    attendance_pending = serializers.IntegerField()
-    course_name = serializers.CharField()
-
-
-class MentorDashboardSerializer(serializers.Serializer):
-    courses = CourseSerializer(many=True)
-    at_risk_students = AtRiskStudentSerializer(many=True)
-    teacher_compliance = TeacherComplianceSerializer(many=True)
-    total_classes_this_week = serializers.IntegerField()
-    total_students = serializers.IntegerField()
-
-
 class AdminStatsSerializer(serializers.Serializer):
     total_students = serializers.IntegerField()
     total_teachers = serializers.IntegerField()
@@ -156,3 +126,64 @@ class AdminStatsSerializer(serializers.Serializer):
 class BulkEnrollSerializer(serializers.Serializer):
     course_id = serializers.IntegerField()
     student_emails = serializers.ListField(child=serializers.EmailField())
+
+# --- Admin Staff Management ---
+
+class BasicUserSerializer(serializers.ModelSerializer):
+    mentor_name = serializers.SerializerMethodField()
+    teacher_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'first_name', 'last_name', 'email', 'role', 'assigned_mentor', 'assigned_teacher', 'mentor_name', 'teacher_name']
+
+    def get_mentor_name(self, obj):
+        m = obj.assigned_mentor
+        return f"{m.first_name} {m.last_name}" if m else None
+
+    def get_teacher_name(self, obj):
+        t = obj.assigned_teacher
+        return f"{t.first_name} {t.last_name}" if t else None
+
+class StaffCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'email', 'password', 'role']
+        extra_kwargs = {
+            'password': {'write_only': True}
+        }
+
+    def validate_role(self, value):
+        if value not in ['teacher', 'mentor']:
+            raise serializers.ValidationError("Role must be either 'teacher' or 'mentor'.")
+        return value
+
+    def create(self, validated_data):
+        user = User(
+            username=validated_data['email'],
+            email=validated_data['email'],
+            first_name=validated_data.get('first_name', ''),
+            last_name=validated_data.get('last_name', ''),
+            role=validated_data['role'],
+            platform='classes',
+            is_active=True
+        )
+        user.set_password(validated_data['password'])
+        user.save()
+        return user
+
+class StaffUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'email', 'role']
+        
+    def validate_role(self, value):
+        if value not in ['teacher', 'mentor']:
+            raise serializers.ValidationError("Role must be either 'teacher' or 'mentor'.")
+        return value
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'email', 'phone_number', 'address', 'current_class', 'school_name', 'is_active']
+

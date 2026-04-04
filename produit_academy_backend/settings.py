@@ -86,6 +86,7 @@ else:
     CORS_ALLOWED_ORIGINS = cors_env.split(',')
     CSRF_TRUSTED_ORIGINS = cors_env.split(',')
 
+CORS_ALLOW_CREDENTIALS = True
 # --- REST FRAMEWORK ---
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (

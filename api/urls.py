@@ -45,6 +45,19 @@ urlpatterns = [
     path('contact/', ContactInquiryView.as_view(), name='contact-inquiry'),
     path('admin/contacts/', AdminContactListView.as_view(), name='admin-contact-list'),
     path('admin/contacts/<int:pk>/', AdminContactUpdateView.as_view(), name='admin-contact-update'),
+    # --- Staff Routes ---
+    path('staff/signup/', StaffSignUpView.as_view(), name='staff-signup'),
+    path('staff/profile/', StaffProfileView.as_view(), name='staff-profile'),
+    path('staff/tasks/', StaffTaskListView.as_view(), name='staff-tasks'),
+    path('staff/tasks/<int:pk>/update/', StaffTaskUpdateView.as_view(), name='staff-task-update'),
+    path('staff/tasks/<int:pk>/comments/', TaskCommentView.as_view(), name='task-comments'),
+
+    # --- Admin Staff Management Routes ---
+    path('admin/staff/', AdminStaffListView.as_view(), name='admin-staff-list'),
+    path('admin/staff/tasks/create/', AdminTaskCreateView.as_view(), name='admin-task-create'),
+    path('admin/staff/tasks/', AdminTaskListView.as_view(), name='admin-task-list'),
+    path('admin/staff/tasks/<int:pk>/', AdminTaskDetailView.as_view(), name='admin-task-detail'),
+
 ]
 
 

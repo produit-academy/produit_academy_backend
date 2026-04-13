@@ -28,6 +28,9 @@ INSTALLED_APPS = [
     'corsheaders',
     # Local
     'api',
+    'gate',
+    'staff_mgmt',
+    'support',
     'careers',
     'classes_app',
 ]

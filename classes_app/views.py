@@ -1,5 +1,5 @@
 from django.utils import timezone
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 from datetime import timedelta
 import csv
 import io
@@ -727,3 +727,93 @@ class AdminEnrollmentToggleCompletionView(APIView):
             })
         except Enrollment.DoesNotExist:
             return Response({'detail': 'Enrollment not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+class AdminUserAnalyticsView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request, pk):
+        try:
+            user = User.objects.get(pk=pk, platform='classes')
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found on this platform.'}, status=status.HTTP_404_NOT_FOUND)
+
+        data = {
+            'user': {
+                'id': user.id,
+                'name': f"{user.first_name} {user.last_name}".strip() or user.username,
+                'email': user.email,
+                'role': user.role,
+                'phone': user.phone_number,
+                'joined': user.date_joined,
+            },
+            'analytics': {}
+        }
+
+        if user.role == 'student':
+            enrollments = Enrollment.objects.filter(student=user)
+            completed_courses = enrollments.filter(is_completed=True).count()
+            total_courses = enrollments.count()
+            
+            attendance = AttendanceRecord.objects.filter(student=user)
+            total_classes = attendance.count()
+            attended = attendance.filter(status='Present').count()
+            attendance_rate = round((attended / total_classes * 100) if total_classes > 0 else 0, 1)
+
+            recent_sessions = attendance.select_related('class_session', 'class_session__course').order_by('-timestamp')[:5]
+            recent_data = [{
+                'session_title': r.class_session.title,
+                'course': r.class_session.course.name,
+                'date': r.class_session.scheduled_time,
+                'status': r.status
+            } for r in recent_sessions]
+
+            data['analytics'] = {
+                'total_courses': total_courses,
+                'completed_courses': completed_courses,
+                'total_classes_recorded': total_classes,
+                'attended_classes': attended,
+                'attendance_rate': attendance_rate,
+                'recent_sessions': recent_data
+            }
+            if user.assigned_mentor:
+                data['user']['mentor'] = f"{user.assigned_mentor.first_name} {user.assigned_mentor.last_name}"
+            if user.assigned_teacher:
+                data['user']['teacher'] = f"{user.assigned_teacher.first_name} {user.assigned_teacher.last_name}"
+
+        elif user.role == 'teacher':
+            sessions = ClassSession.objects.filter(teacher=user, status='Completed')
+            classes_taught = sessions.count()
+            total_minutes = sessions.aggregate(total=Sum('duration_minutes'))['total'] or 0
+            
+            # Avg attendance across all their sessions
+            all_attendance = AttendanceRecord.objects.filter(class_session__teacher=user)
+            total_records = all_attendance.count()
+            present_records = all_attendance.filter(status='Present').count()
+            avg_attendance_rate = round((present_records / total_records * 100) if total_records > 0 else 0, 1)
+
+            data['analytics'] = {
+                'classes_taught': classes_taught,
+                'total_teaching_hours': round(total_minutes / 60, 1),
+                'avg_student_attendance_rate': avg_attendance_rate,
+            }
+
+        elif user.role == 'mentor':
+            assigned_students = User.objects.filter(assigned_mentor=user, platform='classes', role='student')
+            total_assigned = assigned_students.count()
+            
+            # Calculate at-risk students (attendance < 75%)
+            at_risk_count = 0
+            for student in assigned_students:
+                att = AttendanceRecord.objects.filter(student=student)
+                t = att.count()
+                p = att.filter(status='Present').count()
+                rate = (p / t * 100) if t > 0 else 100
+                if rate < 75:
+                    at_risk_count += 1
+
+            data['analytics'] = {
+                'assigned_students': total_assigned,
+                'at_risk_students': at_risk_count
+            }
+
+        return Response(data)

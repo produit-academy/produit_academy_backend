@@ -20,6 +20,7 @@ from .views import (
     AdminStaffDetailView,
     AdminStudentDetailView,
     AdminEnrollmentToggleCompletionView,
+    AdminUserAnalyticsView,
 )
 
 urlpatterns = [
@@ -52,4 +53,5 @@ urlpatterns = [
     path('admin/enrollments/', AdminBulkEnrollView.as_view(), name='classes-admin-enroll'),
     path('admin/enrollments/list/', AdminEnrollmentListView.as_view(), name='classes-admin-enrollment-list'),
     path('admin/stats/', AdminStatsView.as_view(), name='classes-admin-stats'),
+    path('admin/analytics/user/<int:pk>/', AdminUserAnalyticsView.as_view(), name='admin-user-analytics'),
 ]

@@ -78,15 +78,15 @@ DATABASES = {
 AUTH_USER_MODEL = 'api.User'
 
 # --- CORS & CSRF ---
-cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000')
+cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:3004')
 
 if cors_env == '*':
     CORS_ALLOW_ALL_ORIGINS = True
     CSRF_TRUSTED_ORIGINS = []
 else:
     CORS_ALLOW_ALL_ORIGINS = False
-    CORS_ALLOWED_ORIGINS = cors_env.split(',')
-    CSRF_TRUSTED_ORIGINS = cors_env.split(',')
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in cors_env.split(',') if o.strip()]
+    CSRF_TRUSTED_ORIGINS = [o.strip() for o in cors_env.split(',') if o.strip()]
 
 CORS_ALLOW_CREDENTIALS = True
 # --- REST FRAMEWORK ---
@@ -105,9 +105,32 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=365),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=366),
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=7),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+# --- PASSWORD VALIDATORS ---
+AUTH_PASSWORD_VALIDATORS = [
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator', 'OPTIONS': {'min_length': 8}},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+]
+
+# --- SECURITY HEADERS (production) ---
+if not DEBUG:
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = 'DENY'
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 
 # --- EMAIL SETTINGS ---
 EMAIL_BACKEND = "anymail.backends.sendinblue.EmailBackend"

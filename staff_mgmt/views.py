@@ -1,68 +1,243 @@
+from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, NotFound
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from api.models import User, StaffProfile, StaffTask, TaskComment
-from .serializers import StaffProfileSerializer, StaffTaskSerializer, TaskCommentSerializer
+from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskComment, Complaint, ContactInquiry
+from .serializers import (
+    DepartmentSerializer, StaffProfileSerializer,
+    StaffTaskSerializer, TaskCommentSerializer,
+    SuperAdminUserSerializer,
+)
+from .permissions import HasModuleAccess
 
 
-# --- STAFF VIEWS ---
+def is_admin(user):
+    """Check if user is an admin — either by role field or Django is_staff flag."""
+    return user.role == 'admin' or user.is_staff or user.is_superuser
 
-class StaffSignUpView(generics.CreateAPIView):
-    """Admin creates a staff account"""
+
+AVAILABLE_MODULES = [
+    {'key': 'support', 'label': 'Support', 'description': 'Complaints & Contact Inquiries'},
+    {'key': 'careers', 'label': 'Careers', 'description': 'Job Applications'},
+    {'key': 'gate_content', 'label': 'GATE Content', 'description': 'Questions & Study Materials'},
+    {'key': 'classes', 'label': 'Classes', 'description': 'Courses, Enrollments, Attendance'},
+    {'key': 'analytics', 'label': 'Analytics', 'description': 'Dashboard Stats & Reports'},
+]
+
+
+# ============================================================
+# SUPER ADMIN Cross-Platform User Management
+# ============================================================
+
+class SuperAdminUserListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SuperAdminUserSerializer
+
+    def get_queryset(self):
+        if not is_admin(self.request.user):
+            raise PermissionDenied('Only admins can access this.')
+        queryset = User.objects.exclude(role='student').order_by('-date_joined')
+        platform = self.request.query_params.get('platform')
+        if platform:
+            if platform == 'staff':
+                queryset = queryset.filter(role='staff')
+            else:
+                queryset = queryset.filter(platform=platform)
+        role = self.request.query_params.get('role')
+        if role:
+            queryset = queryset.filter(role=role)
+        return queryset
+
+
+class SuperAdminUserCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role != 'admin':
-            return Response({'error': 'Only admins can create staff accounts'}, status=403)
+        if not is_admin(request.user):
+            return Response({'error': 'Only admins can create users.'}, status=403)
 
         email = request.data.get('email')
         password = request.data.get('password')
         first_name = request.data.get('first_name', '')
         last_name = request.data.get('last_name', '')
         phone_number = request.data.get('phone_number', '')
-        designation = request.data.get('designation', '')
+        account_type = request.data.get('account_type', 'platform_admin')
 
         if not email or not password:
-            return Response({'error': 'Email and password are required'}, status=400)
+            return Response({'error': 'Email and password are required.'}, status=400)
+        if User.objects.filter(email=email).exists():
+            return Response({'error': 'A user with this email already exists.'}, status=400)
 
+        valid_types = ['platform_admin', 'support_staff', 'contact_staff', 'hr_staff']
+        if account_type not in valid_types:
+            return Response({'error': 'Invalid account type.'}, status=400)
+
+        if account_type == 'platform_admin':
+            # Create a platform admin
+            platform = request.data.get('platform', 'gate')
+            user = User.objects.create_user(
+                username=email, email=email, password=password,
+                first_name=first_name, last_name=last_name,
+                phone_number=phone_number, role='admin', platform=platform,
+                is_verified=True, is_staff=True,
+            )
+            return Response({
+                'message': f'{platform.upper()} admin account created.',
+                'user_id': user.id, 'email': user.email,
+            }, status=201)
+
+        # Staff accounts
+        user = User.objects.create_user(
+            username=email, email=email, password=password,
+            first_name=first_name, last_name=last_name,
+            phone_number=phone_number, role='staff', is_verified=True,
+        )
+
+        if account_type == 'support_staff':
+            platforms = request.data.get('assigned_platforms', ['gate'])
+            dept_name = f"Support - {', '.join([p.upper() for p in platforms])}"
+            dept, _ = Department.objects.get_or_create(
+                name=dept_name,
+                defaults={'allowed_modules': ['support'], 'description': f'Support staff for {dept_name}'}
+            )
+            StaffProfile.objects.create(user=user, department=dept, designation='Support Staff')
+            label = 'Support staff'
+
+        elif account_type == 'contact_staff':
+            platforms = request.data.get('assigned_platforms', ['gate'])
+            dept_name = f"Contact - {', '.join([p.upper() for p in platforms])}"
+            dept, _ = Department.objects.get_or_create(
+                name=dept_name,
+                defaults={'allowed_modules': ['support'], 'description': f'Contact enquiry staff for {dept_name}'}
+            )
+            StaffProfile.objects.create(user=user, department=dept, designation='Contact Enquiry Staff')
+            label = 'Contact enquiry staff'
+
+        elif account_type == 'hr_staff':
+            dept, _ = Department.objects.get_or_create(
+                name='HR - Careers',
+                defaults={'allowed_modules': ['careers'], 'description': 'HR staff for job application reviews'}
+            )
+            StaffProfile.objects.create(user=user, department=dept, designation='HR Staff')
+            label = 'HR staff'
+
+        return Response({
+            'message': f'{label} account created.',
+            'user_id': user.id, 'email': user.email,
+        }, status=201)
+
+
+class SuperAdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SuperAdminUserSerializer
+
+    def get_object(self):
+        if not is_admin(self.request.user):
+            raise PermissionDenied('Only admins can access this.')
+        try:
+            return User.objects.get(pk=self.kwargs['pk'])
+        except User.DoesNotExist:
+            raise NotFound('User not found.')
+
+    def perform_destroy(self, instance):
+        if instance == self.request.user:
+            raise PermissionDenied('You cannot delete your own account.')
+        instance.delete()
+
+
+# ============================================================
+# DEPARTMENT MANAGEMENT
+# ============================================================
+
+class AvailableModulesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_admin(request.user):
+            raise PermissionDenied('Only admins can access this.')
+        return Response(AVAILABLE_MODULES)
+
+
+class DepartmentListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = DepartmentSerializer
+    queryset = Department.objects.all().order_by('name')
+
+    def perform_create(self, serializer):
+        if not is_admin(self.request.user):
+            raise PermissionDenied('Only admins can create departments.')
+        serializer.save()
+
+
+class DepartmentDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = DepartmentSerializer
+    queryset = Department.objects.all()
+
+    def perform_update(self, serializer):
+        if not is_admin(self.request.user):
+            raise PermissionDenied()
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not is_admin(self.request.user):
+            raise PermissionDenied()
+        instance.delete()
+
+
+# ============================================================
+# STAFF ACCOUNT MANAGEMENT
+# ============================================================
+
+class StaffSignUpView(generics.CreateAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin(request.user):
+            return Response({'error': 'Only admins can create staff accounts'}, status=403)
+
+        email = request.data.get('email')
+        password = request.data.get('password')
+        if not email or not password:
+            return Response({'error': 'Email and password are required'}, status=400)
         if User.objects.filter(email=email).exists():
             return Response({'error': 'User with this email already exists'}, status=400)
 
         user = User.objects.create_user(
-            username=email,
-            email=email,
-            password=password,
-            first_name=first_name,
-            last_name=last_name,
-            phone_number=phone_number,
-            role='staff',
-            is_verified=True
+            username=email, email=email, password=password,
+            first_name=request.data.get('first_name', ''),
+            last_name=request.data.get('last_name', ''),
+            phone_number=request.data.get('phone_number', ''),
+            role='staff', is_verified=True,
         )
 
-        profile = StaffProfile.objects.create(
-            user=user,
-            designation=designation
-        )
+        profile_data = {'user': user, 'designation': request.data.get('designation', '')}
+        department_id = request.data.get('department')
+        if department_id:
+            try:
+                profile_data['department'] = Department.objects.get(pk=department_id)
+            except Department.DoesNotExist:
+                pass
+        StaffProfile.objects.create(**profile_data)
 
-        return Response({
-            'message': 'Staff account created successfully',
-            'user_id': user.id,
-            'email': user.email
-        }, status=201)
+        return Response({'message': 'Staff account created', 'user_id': user.id, 'email': user.email}, status=201)
 
+
+# ============================================================
+# STAFF SELF-SERVICE
+# ============================================================
 
 class StaffProfileView(generics.RetrieveUpdateAPIView):
-    """Staff can view and update their own profile"""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffProfileSerializer
 
     def get_object(self):
         if self.request.user.role != 'staff':
-            raise PermissionDenied('Only staff members can access this.')
-        profile, created = StaffProfile.objects.get_or_create(user=self.request.user)
+            raise PermissionDenied('Only staff can access this.')
+        profile, _ = StaffProfile.objects.get_or_create(user=self.request.user)
         return profile
 
     def patch(self, request, *args, **kwargs):
@@ -74,39 +249,50 @@ class StaffProfileView(generics.RetrieveUpdateAPIView):
         return Response(serializer.errors, status=400)
 
 
+class StaffMyModulesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role != 'staff':
+            raise PermissionDenied('Only staff can access this.')
+        try:
+            profile = request.user.staff_profile
+            dept = profile.department
+            if not dept:
+                return Response({'department': None, 'modules': []})
+            accessible = [m for m in AVAILABLE_MODULES if m['key'] in (dept.allowed_modules or [])]
+            return Response({'department': DepartmentSerializer(dept).data, 'modules': accessible})
+        except StaffProfile.DoesNotExist:
+            return Response({'department': None, 'modules': []})
+
+
 class StaffTaskListView(generics.ListAPIView):
-    """Staff sees only their assigned tasks"""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffTaskSerializer
 
     def get_queryset(self):
         if self.request.user.role != 'staff':
-            raise PermissionDenied('Only staff members can access this.')
+            raise PermissionDenied()
         return StaffTask.objects.filter(assigned_to=self.request.user).order_by('-created_at')
 
 
 class StaffTaskUpdateView(generics.UpdateAPIView):
-    """Staff can mark task complete and add remarks"""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffTaskSerializer
 
     def get_object(self):
         if self.request.user.role != 'staff':
-            raise PermissionDenied('Only staff members can access this.')
+            raise PermissionDenied()
         try:
             return StaffTask.objects.get(pk=self.kwargs['pk'], assigned_to=self.request.user)
         except StaffTask.DoesNotExist:
-            raise NotFound('Task not found.')
+            raise NotFound()
 
     def patch(self, request, *args, **kwargs):
         task = self.get_object()
-        allowed_fields = ['status', 'remarks']
-        data = {k: v for k, v in request.data.items() if k in allowed_fields}
-
+        data = {k: v for k, v in request.data.items() if k in ['status', 'remarks']}
         if data.get('status') == 'completed' and task.status != 'completed':
-            from django.utils import timezone
             data['completed_at'] = timezone.now()
-
         serializer = StaffTaskSerializer(task, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -115,7 +301,6 @@ class StaffTaskUpdateView(generics.UpdateAPIView):
 
 
 class TaskCommentView(generics.ListCreateAPIView):
-    """Staff and admin can view and add comments on a task"""
     permission_classes = [IsAuthenticated]
     serializer_class = TaskCommentSerializer
 
@@ -123,12 +308,10 @@ class TaskCommentView(generics.ListCreateAPIView):
         task_id = self.kwargs['pk']
         user = self.request.user
         if user.role == 'staff':
-            # staff can only comment on their own tasks
-            task = StaffTask.objects.filter(pk=task_id, assigned_to=user).first()
-            if not task:
-                raise PermissionDenied('Task not found or not assigned to you.')
-        elif user.role != 'admin':
-            raise PermissionDenied('Access denied.')
+            if not StaffTask.objects.filter(pk=task_id, assigned_to=user).exists():
+                raise PermissionDenied()
+        elif not is_admin(user):
+            raise PermissionDenied()
         return TaskComment.objects.filter(task_id=task_id).order_by('created_at')
 
     def perform_create(self, serializer):
@@ -136,49 +319,150 @@ class TaskCommentView(generics.ListCreateAPIView):
         user = self.request.user
         if user.role == 'staff':
             task = StaffTask.objects.filter(pk=task_id, assigned_to=user).first()
-            if not task:
-                raise PermissionDenied('Task not found or not assigned to you.')
         elif user.role == 'admin':
             task = StaffTask.objects.filter(pk=task_id).first()
-            if not task:
-                raise NotFound('Task not found.')
         else:
-            raise PermissionDenied('Access denied.')
+            raise PermissionDenied()
+        if not task:
+            raise NotFound()
         serializer.save(author=user, task=task)
 
 
-# --- ADMIN STAFF MANAGEMENT VIEWS ---
+# ============================================================
+# STAFF MODULE ACCESS: Support
+# ============================================================
+
+class StaffComplaintListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_key = 'support'
+
+    def get_queryset(self):
+        return Complaint.objects.all().order_by('-created_at')
+
+    def get_serializer_class(self):
+        from support.serializers import ComplaintSerializer
+        return ComplaintSerializer
+
+
+class StaffComplaintDetailView(generics.RetrieveUpdateAPIView):
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_key = 'support'
+    queryset = Complaint.objects.all()
+
+    def get_serializer_class(self):
+        from support.serializers import ComplaintSerializer
+        return ComplaintSerializer
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        if instance.status == 'Resolved' and not instance.resolved_at:
+            instance.resolved_at = timezone.now()
+            instance.save()
+
+
+class StaffContactListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_key = 'support'
+
+    def get_queryset(self):
+        queryset = ContactInquiry.objects.all().order_by('-created_at')
+        platform = self.request.query_params.get('platform')
+        if platform:
+            queryset = queryset.filter(platform=platform)
+        return queryset
+
+    def get_serializer_class(self):
+        from support.serializers import ContactInquirySerializer
+        return ContactInquirySerializer
+
+
+class StaffContactUpdateView(generics.UpdateAPIView):
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_key = 'support'
+    queryset = ContactInquiry.objects.all()
+
+    def get_serializer_class(self):
+        from support.serializers import ContactInquirySerializer
+        return ContactInquirySerializer
+
+
+# ============================================================
+# STAFF MODULE ACCESS: Careers
+# ============================================================
+
+class StaffJobApplicationListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_key = 'careers'
+
+    def get_queryset(self):
+        from careers.models import JobApplication
+        return JobApplication.objects.all().order_by('-created_at')
+
+    def get_serializer_class(self):
+        from careers.serializers import JobApplicationSerializer
+        return JobApplicationSerializer
+
+
+class StaffJobApplicationUpdateView(generics.UpdateAPIView):
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_key = 'careers'
+
+    def get_queryset(self):
+        from careers.models import JobApplication
+        return JobApplication.objects.all()
+
+    def get_serializer_class(self):
+        from careers.serializers import JobApplicationSerializer
+        return JobApplicationSerializer
+
+# ============================================================
+# ADMIN STAFF MANAGEMENT
+# ============================================================
 
 class AdminStaffListView(generics.ListAPIView):
-    """Admin can see all staff members"""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffProfileSerializer
 
     def get_queryset(self):
-        if self.request.user.role != 'admin':
-            raise PermissionDenied('Only admins can access this.')
-        return StaffProfile.objects.select_related('user').all()
+        if not is_admin(self.request.user):
+            raise PermissionDenied()
+        queryset = StaffProfile.objects.select_related('user', 'department').all()
+        department_id = self.request.query_params.get('department')
+        if department_id:
+            queryset = queryset.filter(department_id=department_id)
+        return queryset
+
+
+class AdminStaffDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffProfileSerializer
+
+    def get_object(self):
+        if not is_admin(self.request.user):
+            raise PermissionDenied()
+        try:
+            return StaffProfile.objects.select_related('user', 'department').get(pk=self.kwargs['pk'])
+        except StaffProfile.DoesNotExist:
+            raise NotFound()
 
 
 class AdminTaskCreateView(generics.CreateAPIView):
-    """Admin assigns a task to a staff member"""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffTaskSerializer
 
     def perform_create(self, serializer):
-        if self.request.user.role != 'admin':
-            raise PermissionDenied('Only admins can assign tasks.')
+        if not is_admin(self.request.user):
+            raise PermissionDenied()
         serializer.save(assigned_by=self.request.user)
 
 
 class AdminTaskListView(generics.ListAPIView):
-    """Admin can see all tasks or filter by staff"""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffTaskSerializer
 
     def get_queryset(self):
-        if self.request.user.role != 'admin':
-            raise PermissionDenied('Only admins can access this.')
+        if not is_admin(self.request.user):
+            raise PermissionDenied()
         staff_id = self.request.query_params.get('staff_id')
         if staff_id:
             return StaffTask.objects.filter(assigned_to_id=staff_id).order_by('-created_at')
@@ -186,14 +470,13 @@ class AdminTaskListView(generics.ListAPIView):
 
 
 class AdminTaskDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Admin can view, edit or delete any task"""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffTaskSerializer
 
     def get_object(self):
-        if self.request.user.role != 'admin':
-            raise PermissionDenied('Only admins can access this.')
+        if not is_admin(self.request.user):
+            raise PermissionDenied()
         try:
             return StaffTask.objects.get(pk=self.kwargs['pk'])
         except StaffTask.DoesNotExist:
-            raise NotFound('Task not found.')
+            raise NotFound()

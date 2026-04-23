@@ -114,8 +114,8 @@ EMAIL_BACKEND = "anymail.backends.sendinblue.EmailBackend"
 ANYMAIL = {
     "SENDINBLUE_API_KEY": os.environ.get('BREVO_API_KEY'),
 }
-DEFAULT_FROM_EMAIL = "Produit Academy <techproduit6@gmail.com>"
-SERVER_EMAIL = "techproduit6@gmail.com"
+DEFAULT_FROM_EMAIL = "Produit Academy <noreply@produitacademy.com>"
+SERVER_EMAIL = "noreply@produitacademy.com"
 
 # --- STATIC & MEDIA ---
 STATIC_URL = 'static/'

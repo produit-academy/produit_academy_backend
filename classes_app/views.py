@@ -7,7 +7,7 @@ import io
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.exceptions import PermissionDenied
 
 from api.models import User
@@ -149,11 +149,8 @@ class TeacherDashboardView(APIView):
             assigned_teacher=user, platform='classes', role='student'
         ).order_by('first_name')
 
-        # Courses where this teacher has sessions
-        course_ids = ClassSession.objects.filter(
-            teacher=user
-        ).values_list('course_id', flat=True).distinct()
-        courses = Course.objects.filter(id__in=course_ids, is_active=True)
+        # All active courses for dropdowns
+        courses = Course.objects.filter(is_active=True)
 
         # Upcoming scheduled classes
         upcoming = ClassSession.objects.filter(
@@ -340,7 +337,7 @@ class AdminCourseDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class AdminBulkEnrollView(APIView):
     permission_classes = [permissions.IsAdminUser]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
         # Support both JSON body and CSV file upload
@@ -452,16 +449,7 @@ class AdminBulkEnrollView(APIView):
             })
         else:
             # JSON body — supports single email or list
-            content_type = request.content_type or ''
-
-            if 'application/json' in content_type:
-                import json
-                try:
-                    body = json.loads(request.body)
-                except json.JSONDecodeError:
-                    return Response({'detail': 'Invalid JSON'}, status=status.HTTP_400_BAD_REQUEST)
-            else:
-                body = request.data
+            body = request.data
 
             course_id = body.get('course_id')
             email = body.get('email')  # Single email for manual enroll
@@ -720,7 +708,7 @@ class AdminStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = UserUpdateSerializer
 
     def get_queryset(self):
-        return User.objects.filter(platform='classes', role='student')
+        return User.objects.filter(platform='classes')
 
 
 class AdminEnrollmentToggleCompletionView(APIView):

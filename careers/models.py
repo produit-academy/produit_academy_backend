@@ -5,7 +5,7 @@ class JobApplication(models.Model):
     email = models.EmailField()
     phone = models.CharField(max_length=20)
     position = models.CharField(max_length=100)
-    portfolio = models.URLField(blank=True, null=True)
+    portfolio = models.CharField(max_length=500, blank=True, null=True)
     declaration = models.BooleanField(default=False)
     interviewed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

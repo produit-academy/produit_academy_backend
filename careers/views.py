@@ -20,7 +20,6 @@ class JobApplicationCreateView(generics.CreateAPIView):
         # Plain text fallback
         message = f"Hi {application.name},\n\nThank you for applying for the {application.position} role at Produit Academy! We have received your application and will review it shortly.\n\nBest regards,\nThe Produit Academy Team"
         
-        # Nice HTML version using your brand colors
         html_message = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
             <h2 style="color: #228B22; text-align: center;">Application Received!</h2>
@@ -40,18 +39,7 @@ class JobApplicationCreateView(generics.CreateAPIView):
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[application.email],
                 html_message=html_message,
-                fail_silently=True  # If the email fails, the user still gets a success message on the frontend
+                fail_silently=True
             )
         except Exception as e:
             print(f"Careers Email Error: {e}")
-
-
-class AdminJobApplicationListView(generics.ListAPIView):
-    permission_classes = [permissions.IsAdminUser] 
-    queryset = JobApplication.objects.all().order_by('-created_at')
-    serializer_class = JobApplicationSerializer
-
-class AdminJobApplicationDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAdminUser]
-    queryset = JobApplication.objects.all()
-    serializer_class = JobApplicationSerializer

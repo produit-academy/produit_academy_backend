@@ -12,9 +12,35 @@ class Course(models.Model):
         return self.name
 
 
+class TeacherProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='classes_teacher_profile', limit_choices_to={'role': 'teacher'})
+    subjects = models.ManyToManyField(Course, related_name='teachers')
+
+    def __str__(self):
+        return f"Profile: {self.user.username}"
+
+
+class TeacherAvailability(models.Model):
+    DAY_CHOICES = [
+        ('Monday', 'Monday'), ('Tuesday', 'Tuesday'), ('Wednesday', 'Wednesday'),
+        ('Thursday', 'Thursday'), ('Friday', 'Friday'), ('Saturday', 'Saturday'), ('Sunday', 'Sunday')
+    ]
+    teacher = models.ForeignKey(TeacherProfile, on_delete=models.CASCADE, related_name='availabilities')
+    day_of_week = models.CharField(max_length=15, choices=DAY_CHOICES)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+
+    class Meta:
+        ordering = ['day_of_week', 'start_time']
+
+    def __str__(self):
+        return f"{self.teacher.user.username} - {self.day_of_week} ({self.start_time} to {self.end_time})"
+
+
 class Enrollment(models.Model):
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='classes_enrollments')
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='classes_enrollments', limit_choices_to={'role': 'student'})
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='enrollments')
+    teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='assigned_enrollments', limit_choices_to={'role': 'teacher'})
     enrolled_at = models.DateTimeField(auto_now_add=True)
     is_completed = models.BooleanField(default=False)
 
@@ -33,12 +59,15 @@ class ClassSession(models.Model):
     ]
 
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='sessions')
-    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='taught_sessions')
+    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='taught_sessions', limit_choices_to={'role': 'teacher'})
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='attended_sessions', null=True, blank=True, limit_choices_to={'role': 'student'})
     title = models.CharField(max_length=200)
-    meeting_link = models.URLField(max_length=500)
+    meeting_link = models.URLField(max_length=500, blank=True, null=True)
     scheduled_time = models.DateTimeField()
     duration_minutes = models.IntegerField(default=60)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Scheduled')
+    is_demo = models.BooleanField(default=False)
+    teacher_notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -49,7 +49,8 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'course', 'course_name', 'teacher', 'teacher_name',
             'title', 'meeting_link', 'scheduled_time', 'duration_minutes',
-            'status', 'attendance_submitted', 'created_at'
+            'status', 'attendance_submitted', 'created_at',
+            'is_demo', 'student', 'teacher_notes'
         ]
         read_only_fields = ['teacher', 'created_at']
 

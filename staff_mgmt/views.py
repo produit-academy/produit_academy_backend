@@ -6,6 +6,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskComment, Complaint, ContactInquiry
+from classes_app.models import Course, TeacherProfile
+from api.views import send_html_email
+import random
+from datetime import timedelta
 from .serializers import (
     DepartmentSerializer, StaffProfileSerializer,
     StaffTaskSerializer, TaskCommentSerializer,
@@ -225,6 +229,95 @@ class StaffSignUpView(generics.CreateAPIView):
 
         return Response({'message': 'Staff account created', 'user_id': user.id, 'email': user.email}, status=201)
 
+
+# ============================================================
+# HR ONBOARDING FOR CLASSES STAFF
+# ============================================================
+
+class OnboardStaffView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (is_admin(request.user) or request.user.role == 'staff'):
+            return Response({'error': 'Only HR and admins can view staff.'}, status=403)
+
+        staff = User.objects.filter(
+            platform='classes', role__in=['teacher', 'mentor']
+        ).order_by('-date_joined')
+
+        data = [{
+            'id': u.id,
+            'email': u.email,
+            'first_name': u.first_name,
+            'last_name': u.last_name,
+            'role': u.role,
+            'is_verified': u.is_verified,
+            'date_joined': u.date_joined.isoformat(),
+            'has_signed': u.otp is None,  # OTP cleared = agreement signed
+        } for u in staff]
+
+        return Response(data)
+
+    def post(self, request):
+        if not (is_admin(request.user) or request.user.role == 'staff'):
+            return Response({'error': 'Only HR and admins can onboard staff.'}, status=403)
+
+        email = request.data.get('email')
+        role = request.data.get('role') # 'teacher' or 'mentor'
+        subjects = request.data.get('subjects', []) # list of course IDs
+
+        if not email or role not in ['teacher', 'mentor']:
+            return Response({'error': 'Valid email and role (teacher/mentor) required.'}, status=400)
+            
+        if User.objects.filter(email=email).exists():
+            return Response({'error': 'User already exists.'}, status=400)
+
+        otp = str(random.randint(100000, 999999))
+        user = User.objects.create_user(
+            username=email, email=email,
+            role=role, platform='classes',
+            is_verified=False,
+            otp=otp,
+            otp_expiry=timezone.now() + timedelta(days=7)
+        )
+        
+        if role == 'teacher':
+            profile = TeacherProfile.objects.create(user=user)
+            if subjects:
+                profile.subjects.set(Course.objects.filter(id__in=subjects))
+                
+        try:
+            send_html_email('Welcome to Produit Academy Classes', user.email, user.email.split('@')[0], otp, type='staff_otp')
+        except Exception:
+            pass
+            
+        return Response({'message': f'{role.capitalize()} onboarded successfully.', 'user_id': user.id}, status=201)
+
+
+class ApproveStaffView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not (is_admin(request.user) or request.user.role == 'staff'):
+            return Response({'error': 'Only HR and admins can approve staff.'}, status=403)
+            
+        user_id = request.data.get('user_id')
+        try:
+            user = User.objects.get(id=user_id, role__in=['teacher', 'mentor'])
+            if user.is_verified:
+                return Response({'message': 'User already verified.'}, status=400)
+                
+            user.is_verified = True
+            user.save()
+            
+            try:
+                send_html_email('Contract Approved', user.email, user.email.split('@')[0], type='staff_welcome')
+            except Exception:
+                pass
+                
+            return Response({'message': 'Staff approved and verified successfully.'})
+        except User.DoesNotExist:
+            return Response({'error': 'User not found.'}, status=404)
 
 # ============================================================
 # STAFF SELF-SERVICE

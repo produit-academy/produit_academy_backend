@@ -18,7 +18,7 @@ from .serializers import (
 
 # --- EMAIL HELPER FUNCTION ---
 
-def send_html_email(subject, recipient_email, username, otp, type='reset'): 
+def send_html_email(subject, recipient_email, username, otp=None, type='reset', **kwargs): 
     if type == 'reset':
         title = "Password Reset Request"
         intro = "We received a request to reset the password for your account."
@@ -28,6 +28,21 @@ def send_html_email(subject, recipient_email, username, otp, type='reset'):
     elif type == 'approval':
         title = "Course Request Approved!"
         intro = "Congratulations! Your request to join the course has been approved."
+    elif type == 'staff_otp':
+        title = "Welcome to the Produit Academy Team!"
+        intro = "We are thrilled to extend an offer for you to join our faculty."
+    elif type == 'staff_welcome':
+        title = "Contract Approved!"
+        intro = f"Your account is now verified. You can log in using your email."
+    elif type == 'demo_alert':
+        title = "Action Required: Demo Link Needed"
+        intro = f"You have a new Demo Class scheduled with {kwargs.get('student_name', 'a student')}. Please log in and provide a meeting link."
+    elif type == 'demo_link':
+        title = "Your Demo Class is Confirmed!"
+        intro = f"Your Demo Class with {kwargs.get('teacher_name', 'your teacher')} is scheduled."
+    elif type == 'mentor_demo_alert':
+        title = "Demo Class Scheduled"
+        intro = f"Your assigned student, {kwargs.get('student_name', 'a student')}, has a Demo Class scheduled."
     else: # resend
         title = "New OTP Request"
         intro = "We received a request to resend your verification code."
@@ -45,7 +60,29 @@ def send_html_email(subject, recipient_email, username, otp, type='reset'):
                 </div>
                 <p>Good luck with your studies!</p>
         """
-    else:
+    elif type == 'staff_otp' and otp:
+        message_body = f"""
+                    <p>Dear <strong>{username}</strong>,</p>
+                    <p>We are thrilled to officially invite you to join the Produit Academy team! Your expertise will be invaluable in shaping the futures of our students.</p>
+                    
+                    <div style="background-color: #f8fafc; border-left: 4px solid #0070f3; padding: 15px 20px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">What's included in this Agreement?</h3>
+                        <ul style="margin-bottom: 0; padding-left: 20px; font-size: 14px; color: #444;">
+                            <li style="margin-bottom: 8px;"><strong>Role Commitment:</strong> Agreement to provide high-quality, dedicated teaching or mentorship services to your assigned students.</li>
+                            <li style="margin-bottom: 8px;"><strong>Platform Guidelines:</strong> Adherence to Produit Academy's teaching standards, code of conduct, and operational workflows.</li>
+                            <li style="margin-bottom: 8px;"><strong>Confidentiality:</strong> Protection of student data and our proprietary educational materials.</li>
+                            <li><strong>Terms & Privacy:</strong> Acceptance of our standard Terms of Service and Privacy Policy.</li>
+                        </ul>
+                    </div>
+                    
+                    <p>To finalize your onboarding and sign the digital contract, please visit the <a href="https://produitacademy.com/agreement" style="color: #0070f3; font-weight: bold; text-decoration: none;">Agreement Portal</a> and enter the secure Verification Code (OTP) below:</p>
+                    
+                    <div class="otp-box">{otp}</div>
+                    
+                    <p>This code will expire in 7 days. Once signed, your account will be sent to HR for final approval and activation.</p>
+                    <p>If you have any questions before signing, please reply directly to this email.</p>
+        """
+    elif type in ['reset', 'signup', 'resend'] and otp:
         message_body = f"""
                     <p>Hi <strong>{username}</strong>,</p>
                     <p>{intro}</p>
@@ -53,6 +90,31 @@ def send_html_email(subject, recipient_email, username, otp, type='reset'):
                     <div class="otp-box">{otp}</div>
                     <p>This OTP will expire in 10 minutes for security reasons.</p>
                     <p>If you did not request this, please ignore this email or contact support.</p>
+        """
+    elif type == 'demo_link':
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>{intro}</p>
+                    <p><strong>Time:</strong> {kwargs.get('time', 'TBA')}</p>
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{kwargs.get('link', '#')}" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Join Class</a>
+                    </div>
+                    <p>Please log in 5 minutes early.</p>
+        """
+    elif type == 'mentor_demo_alert':
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>{intro}</p>
+                    <p><strong>Time:</strong> {kwargs.get('time', 'TBA')}</p>
+                    <p>Log in to your mentor dashboard to view the session.</p>
+        """
+    else:
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>{intro}</p>
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="https://produitacademy.com/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Log In Now</a>
+                    </div>
         """
 
     html_content = f"""
@@ -176,6 +238,23 @@ class VerifyOTPView(APIView):
             return Response({'detail': 'Invalid or expired OTP'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
             return Response({'detail': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+class VerifyAgreementView(APIView):
+    permission_classes = [permissions.AllowAny]
+    
+    def post(self, request):
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+        
+        try:
+            user = User.objects.get(email=email, role__in=['teacher', 'mentor'])
+            if user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
+                user.otp = None
+                user.save()
+                return Response({'message': 'Agreement signed successfully. Pending HR approval.'})
+            return Response({'error': 'Invalid or expired OTP.'}, status=400)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found.'}, status=404)
 
 class ResendOTPView(APIView):
     permission_classes = [permissions.AllowAny]

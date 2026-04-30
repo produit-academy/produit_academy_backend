@@ -21,6 +21,8 @@ from .views import (
     AdminStudentDetailView,
     AdminEnrollmentToggleCompletionView,
     AdminUserAnalyticsView,
+    ScheduleDemoView, TeacherDemoLinkView, AcceptDemoView,
+    BookSessionView, CompleteSessionView,
 )
 
 urlpatterns = [
@@ -41,6 +43,13 @@ urlpatterns = [
     path('sessions/create/', SessionCreateView.as_view(), name='classes-session-create'),
     path('sessions/<int:pk>/roster/', SessionRosterView.as_view(), name='classes-session-roster'),
     path('sessions/<int:pk>/attendance/', BulkAttendanceView.as_view(), name='classes-session-attendance'),
+
+    # 1-to-1 Demo & Flexible Booking
+    path('schedule-demo/', ScheduleDemoView.as_view(), name='admin-schedule-demo'),
+    path('teacher/demo/<int:pk>/link/', TeacherDemoLinkView.as_view(), name='teacher-demo-link'),
+    path('student/demo/<int:pk>/accept/', AcceptDemoView.as_view(), name='student-accept-demo'),
+    path('student/book-session/', BookSessionView.as_view(), name='student-book-session'),
+    path('teacher/session/<int:pk>/complete/', CompleteSessionView.as_view(), name='teacher-complete-session'),
 
     # Admin
     path('admin/staff/', AdminStaffManagementView.as_view(), name='admin-staff-management'),

@@ -96,12 +96,19 @@ class StudentDashboardView(APIView):
 
         courses = Course.objects.filter(id__in=enrolled_course_ids, is_active=True)
 
-        # Upcoming classes (scheduled, in the future)
+        # Upcoming classes: enrolled courses OR demos assigned directly to this student
         upcoming = ClassSession.objects.filter(
-            course_id__in=enrolled_course_ids,
+            Q(course_id__in=enrolled_course_ids) | Q(student=user),
             scheduled_time__gte=now,
             status='Scheduled'
-        ).order_by('scheduled_time')[:10]
+        ).distinct().order_by('scheduled_time')[:10]
+
+        # Completed demos awaiting student acceptance (not yet enrolled)
+        completed_demos = ClassSession.objects.filter(
+            student=user, is_demo=True, status='Completed'
+        ).exclude(
+            course_id__in=enrolled_course_ids
+        ).order_by('-scheduled_time')[:5]
 
         # Attendance stats
         records = AttendanceRecord.objects.filter(student=user)
@@ -123,6 +130,7 @@ class StudentDashboardView(APIView):
 
         data = {
             'upcoming_classes': ClassSessionSerializer(upcoming, many=True).data,
+            'completed_demos': ClassSessionSerializer(completed_demos, many=True).data,
             'total_classes': total,
             'present_count': present,
             'absent_count': absent,
@@ -817,3 +825,152 @@ class AdminUserAnalyticsView(APIView):
             }
 
         return Response(data)
+
+
+# ============================================================
+# 1-TO-1 DEMO AND FLEXIBLE BOOKING
+# ============================================================
+
+from api.views import send_html_email
+from .models import TeacherProfile, TeacherAvailability
+
+class ScheduleDemoView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role not in ['admin', 'mentor']:
+            return Response({'error': 'Only admins and mentors can schedule demos.'}, status=403)
+        student_id = request.data.get('student_id')
+        teacher_id = request.data.get('teacher_id')
+        course_id = request.data.get('course_id')
+        scheduled_time = request.data.get('scheduled_time')
+
+        try:
+            student = User.objects.get(pk=student_id, role='student')
+            teacher = User.objects.get(pk=teacher_id, role='teacher')
+            course = Course.objects.get(pk=course_id)
+        except (User.DoesNotExist, Course.DoesNotExist):
+            return Response({'error': 'Invalid student, teacher, or course.'}, status=404)
+
+        # Business rule: 1 teacher = 1 student (exclusive)
+        # Check if this teacher already has an active enrollment with a DIFFERENT student
+        existing = Enrollment.objects.filter(teacher=teacher).exclude(student=student).first()
+        if existing:
+            return Response({
+                'error': f'{teacher.first_name} {teacher.last_name} is already assigned to another student ({existing.student.first_name} {existing.student.last_name}). Each teacher can only have 1 student.'
+            }, status=400)
+
+        demo = ClassSession.objects.create(
+            student=student,
+            teacher=teacher,
+            course=course,
+            title=f"Demo: {course.name}",
+            scheduled_time=scheduled_time,
+            duration_minutes=30,
+            is_demo=True,
+        )
+
+        try:
+            send_html_email(
+                subject='Action Required: Demo Link Needed',
+                recipient_email=teacher.email,
+                username=teacher.email.split('@')[0],
+                type='demo_alert',
+                student_name=student.first_name
+            )
+        except Exception:
+            pass
+
+        return Response({'message': 'Demo scheduled successfully.', 'demo_id': demo.id})
+
+
+class TeacherDemoLinkView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsTeacher]
+
+    def patch(self, request, pk):
+        link = request.data.get('meeting_link')
+        if not link:
+            return Response({'error': 'meeting_link is required'}, status=400)
+
+        try:
+            demo = ClassSession.objects.get(pk=pk, teacher=request.user, is_demo=True)
+            demo.meeting_link = link
+            demo.save() # Signal will trigger Brevo email
+            return Response({'message': 'Meeting link saved successfully.'})
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'Demo not found'}, status=404)
+
+
+class AcceptDemoView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            demo = ClassSession.objects.get(pk=pk, student=request.user, is_demo=True)
+            if demo.status != 'Completed':
+                return Response({'error': 'Demo is not completed yet.'}, status=400)
+            
+            # Business rule: 1 teacher = 1 student (exclusive)
+            existing = Enrollment.objects.filter(teacher=demo.teacher).exclude(student=request.user).first()
+            if existing:
+                return Response({
+                    'error': f'This teacher is already assigned to another student. Each teacher can only have 1 student.'
+                }, status=400)
+
+            # Create enrollment
+            enrollment, created = Enrollment.objects.get_or_create(
+                student=request.user,
+                course=demo.course,
+                defaults={'teacher': demo.teacher}
+            )
+            
+            if not created and not enrollment.teacher:
+                enrollment.teacher = demo.teacher
+                enrollment.save()
+                
+            return Response({'message': 'Demo accepted and enrolled successfully.'})
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'Demo not found'}, status=404)
+
+
+class BookSessionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        course_id = request.data.get('course_id')
+        scheduled_time = request.data.get('scheduled_time')
+
+        try:
+            enrollment = Enrollment.objects.get(student=request.user, course_id=course_id)
+            teacher = enrollment.teacher
+            if not teacher:
+                return Response({'error': 'No teacher assigned for this course.'}, status=400)
+            
+            session = ClassSession.objects.create(
+                student=request.user,
+                teacher=teacher,
+                course=enrollment.course,
+                title=f"1-to-1 Class: {enrollment.course.name}",
+                scheduled_time=scheduled_time,
+                duration_minutes=60,
+                is_demo=False
+            )
+            return Response({'message': 'Session booked successfully.', 'session_id': session.id})
+        except Enrollment.DoesNotExist:
+            return Response({'error': 'Not enrolled in this course.'}, status=400)
+
+
+class CompleteSessionView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsTeacher]
+
+    def patch(self, request, pk):
+        notes = request.data.get('teacher_notes', '')
+        try:
+            session = ClassSession.objects.get(pk=pk, teacher=request.user)
+            session.status = 'Completed'
+            session.teacher_notes = notes
+            session.save()
+            return Response({'message': 'Session marked as completed.'})
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'Session not found'}, status=404)
+

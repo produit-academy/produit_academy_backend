@@ -9,6 +9,7 @@ from .views import (
     StaffJobApplicationListView, StaffJobApplicationUpdateView,
     AdminStaffListView, AdminStaffDetailView,
     AdminTaskCreateView, AdminTaskListView, AdminTaskDetailView,
+    OnboardStaffView, ApproveStaffView
 )
 
 urlpatterns = [
@@ -46,4 +47,8 @@ urlpatterns = [
     path('admin/staff/tasks/create/', AdminTaskCreateView.as_view(), name='admin-task-create'),
     path('admin/staff/tasks/', AdminTaskListView.as_view(), name='admin-task-list'),
     path('admin/staff/tasks/<int:pk>/', AdminTaskDetailView.as_view(), name='admin-task-detail'),
+
+    # HR Onboarding for Classes Staff
+    path('admin/onboard-staff/', OnboardStaffView.as_view(), name='onboard-classes-staff'),
+    path('admin/approve-staff/', ApproveStaffView.as_view(), name='approve-classes-staff'),
 ]

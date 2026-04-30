@@ -4,3 +4,6 @@ class ClassesAppConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'classes_app'
     verbose_name = 'Classes'
+
+    def ready(self):
+        import classes_app.signals

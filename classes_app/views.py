@@ -933,6 +933,22 @@ class AcceptDemoView(APIView):
             return Response({'error': 'Demo not found'}, status=404)
 
 
+class RejectDemoView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            demo = ClassSession.objects.get(pk=pk, student=request.user, is_demo=True)
+            if demo.status != 'Completed':
+                return Response({'error': 'Demo is not completed yet.'}, status=400)
+            demo.status = 'Cancelled'
+            demo.save()
+            
+            return Response({'message': 'Demo rejected. HR will assign a new teacher soon.'})
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'Demo not found'}, status=404)
+
+
 class BookSessionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 

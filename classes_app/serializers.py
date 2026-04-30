@@ -133,10 +133,11 @@ class BulkEnrollSerializer(serializers.Serializer):
 class BasicUserSerializer(serializers.ModelSerializer):
     mentor_name = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
+    subjects = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'role', 'assigned_mentor', 'assigned_teacher', 'mentor_name', 'teacher_name']
+        fields = ['id', 'first_name', 'last_name', 'email', 'role', 'assigned_mentor', 'assigned_teacher', 'mentor_name', 'teacher_name', 'subjects']
 
     def get_mentor_name(self, obj):
         m = obj.assigned_mentor
@@ -145,6 +146,11 @@ class BasicUserSerializer(serializers.ModelSerializer):
     def get_teacher_name(self, obj):
         t = obj.assigned_teacher
         return f"{t.first_name} {t.last_name}" if t else None
+        
+    def get_subjects(self, obj):
+        if obj.role == 'teacher' and hasattr(obj, 'classes_teacher_profile'):
+            return list(obj.classes_teacher_profile.subjects.values_list('id', flat=True))
+        return []
 
 class StaffCreateSerializer(serializers.ModelSerializer):
     class Meta:

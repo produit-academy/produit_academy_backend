@@ -21,7 +21,7 @@ from .views import (
     AdminStudentDetailView,
     AdminEnrollmentToggleCompletionView,
     AdminUserAnalyticsView,
-    ScheduleDemoView, TeacherDemoLinkView, AcceptDemoView,
+    ScheduleDemoView, TeacherDemoLinkView, AcceptDemoView, RejectDemoView,
     BookSessionView, CompleteSessionView,
 )
 
@@ -48,6 +48,7 @@ urlpatterns = [
     path('schedule-demo/', ScheduleDemoView.as_view(), name='admin-schedule-demo'),
     path('teacher/demo/<int:pk>/link/', TeacherDemoLinkView.as_view(), name='teacher-demo-link'),
     path('student/demo/<int:pk>/accept/', AcceptDemoView.as_view(), name='student-accept-demo'),
+    path('student/demo/<int:pk>/reject/', RejectDemoView.as_view(), name='student-reject-demo'),
     path('student/book-session/', BookSessionView.as_view(), name='student-book-session'),
     path('teacher/session/<int:pk>/complete/', CompleteSessionView.as_view(), name='teacher-complete-session'),
 

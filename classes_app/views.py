@@ -3,6 +3,7 @@ from django.db.models import Count, Q, Sum
 from datetime import timedelta
 import csv
 import io
+from django.core.mail import send_mail
 
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
@@ -378,9 +379,6 @@ class AdminBulkEnrollView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
-        # Support both JSON body and CSV file upload
-        csv_file = request.FILES.get('file')
-
         # Optional staff assignment
         mentor_id = request.data.get('mentor_id')
         teacher_id = request.data.get('teacher_id')
@@ -398,175 +396,105 @@ class AdminBulkEnrollView(APIView):
             except User.DoesNotExist:
                 pass
 
-        if csv_file:
-            # CSV file upload
-            course_id = request.data.get('course_id')
-            if not course_id:
-                return Response({'detail': 'course_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        body = request.data
 
+        course_id = body.get('course_id')
+        email = body.get('email')
+
+        # Extra profile fields
+        first_name = body.get('first_name')
+        last_name = body.get('last_name')
+        phone = body.get('phone_number')
+        address = body.get('address')
+        current_class = body.get('current_class')
+        school = body.get('school_name')
+
+        if not course_id or not email:
+            return Response({'detail': 'course_id and email are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            course = Course.objects.get(pk=course_id)
+        except Course.DoesNotExist:
+            return Response({'detail': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            student = User.objects.get(email=email)
+            created_user = False
+        except User.DoesNotExist:
+            # Create student automatically
+            password = phone if phone else "ProduitStudent123!" 
+            student = User.objects.create_user(
+                username=email,
+                email=email,
+                password=password,
+                role='student',
+                platform='classes',
+                is_active=True,
+                is_verified=True
+            )
+            created_user = True
+
+        _, created_enrollment = Enrollment.objects.get_or_create(
+            student=student, course=course
+        )
+
+        # Update student profile fields if provided
+        updated = False
+        if mentor and not student.assigned_mentor:
+            student.assigned_mentor = mentor
+            updated = True
+        if teacher and not student.assigned_teacher:
+            student.assigned_teacher = teacher
+            updated = True
+        if first_name and not student.first_name:
+            student.first_name = first_name
+            updated = True
+        if last_name and not student.last_name:
+            student.last_name = last_name
+            updated = True
+        if phone and not student.phone_number:
+            student.phone_number = phone
+            updated = True
+        if address and not student.address:
+            student.address = address
+            updated = True
+        if current_class and not student.current_class:
+            student.current_class = current_class
+            updated = True
+        if school and not student.school_name:
+            student.school_name = school
+            updated = True
+        
+        if updated:
+            student.save()
+
+        # Send enrollment email
+        if created_enrollment:
+            subject = f"You have been enrolled in {course.name}"
+            message = f"Hello {student.first_name or 'Student'},\n\nYou have been successfully enrolled in the course '{course.name}' at Produit Academy.\n"
+            if created_user:
+                message += f"\nAn account has been created for you.\nYour login email is: {student.email}\nYour temporary password is: {phone if phone else 'ProduitStudent123!'}\n\nPlease log in at https://classes.produitacademy.com/login and change your password.\n"
+            else:
+                message += f"\nPlease log in at https://classes.produitacademy.com/login to view your new course.\n"
+            message += "\nBest regards,\nProduit Academy Team"
+            
             try:
-                course = Course.objects.get(pk=course_id)
-            except Course.DoesNotExist:
-                return Response({'detail': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
-
-            decoded = csv_file.read().decode('utf-8')
-            reader = csv.reader(io.StringIO(decoded))
-            enrolled = 0
-            errors = []
-
-            for row in reader:
-                if not row:
-                    continue
-                email = row[0].strip()
-                if not email or email.lower() == 'email':
-                    continue  # Skip header row if present
-                
-                # Extract optional fields if they exist in the CSV
-                first_name = row[1].strip() if len(row) > 1 else None
-                last_name = row[2].strip() if len(row) > 2 else None
-                phone = row[3].strip() if len(row) > 3 else None
-                address = row[4].strip() if len(row) > 4 else None
-                current_class = row[5].strip() if len(row) > 5 else None
-                school = row[6].strip() if len(row) > 6 else None
-
-                try:
-                    student = User.objects.get(email=email)
-                except User.DoesNotExist:
-                    # Create student automatically
-                    password = phone if phone else "ProduitStudent123!" 
-                    student = User.objects.create_user(
-                        username=email,
-                        email=email,
-                        password=password,
-                        role='student',
-                        platform='classes',
-                        is_active=True,
-                        is_verified=True
-                    )
-
-                _, created = Enrollment.objects.get_or_create(
-                    student=student, course=course
+                send_mail(
+                    subject,
+                    message,
+                    'noreply@produitacademy.com',
+                    [student.email],
+                    fail_silently=True,
                 )
-                
-                # Update student profile fields
-                updated = False
-                if mentor and not student.assigned_mentor:
-                    student.assigned_mentor = mentor
-                    updated = True
-                if teacher and not student.assigned_teacher:
-                    student.assigned_teacher = teacher
-                    updated = True
-                if first_name and not student.first_name:
-                    student.first_name = first_name
-                    updated = True
-                if last_name and not student.last_name:
-                    student.last_name = last_name
-                    updated = True
-                if phone and not student.phone_number:
-                    student.phone_number = phone
-                    updated = True
-                if address and not student.address:
-                    student.address = address
-                    updated = True
-                if current_class and not student.current_class:
-                    student.current_class = current_class
-                    updated = True
-                if school and not student.school_name:
-                    student.school_name = school
-                    updated = True
-                    
-                if updated:
-                    student.save()
-                    
-                if created:
-                    enrolled += 1
+            except Exception as e:
+                print(f"Failed to send email: {e}")
 
             return Response({
-                'detail': f'Enrolled {enrolled} students.',
-                'errors': errors,
+                'detail': f'Student enrolled successfully. Email notification sent.',
             })
         else:
-            # JSON body — supports single email or list
-            body = request.data
-
-            course_id = body.get('course_id')
-            email = body.get('email')  # Single email for manual enroll
-            student_emails = body.get('student_emails', [])  # Bulk list
-
-            # Extra profile fields (for single manual enroll)
-            extra_first_name = body.get('first_name')
-            extra_last_name = body.get('last_name')
-            extra_phone = body.get('phone_number')
-            extra_address = body.get('address')
-            extra_class = body.get('current_class')
-            extra_school = body.get('school_name')
-
-            if email:
-                student_emails = [email]
-
-            if not course_id or not student_emails:
-                return Response({'detail': 'course_id and email(s) are required'}, status=status.HTTP_400_BAD_REQUEST)
-
-            try:
-                course = Course.objects.get(pk=course_id)
-            except Course.DoesNotExist:
-                return Response({'detail': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
-
-            enrolled = 0
-            errors = []
-            for em in student_emails:
-                try:
-                    student = User.objects.get(email=em)
-                except User.DoesNotExist:
-                    # Create student automatically
-                    password = extra_phone if extra_phone else "ProduitStudent123!" 
-                    student = User.objects.create_user(
-                        username=em,
-                        email=em,
-                        password=password,
-                        role='student',
-                        platform='classes',
-                        is_active=True,
-                        is_verified=True
-                    )
-                
-                _, created = Enrollment.objects.get_or_create(
-                    student=student, course=course
-                )
-                # Update student profile fields if provided
-                updated = False
-                if mentor and not student.assigned_mentor:
-                    student.assigned_mentor = mentor
-                    updated = True
-                if teacher and not student.assigned_teacher:
-                    student.assigned_teacher = teacher
-                    updated = True
-                if extra_first_name and not student.first_name:
-                    student.first_name = extra_first_name
-                    updated = True
-                if extra_last_name and not student.last_name:
-                    student.last_name = extra_last_name
-                    updated = True
-                if extra_phone and not student.phone_number:
-                    student.phone_number = extra_phone
-                    updated = True
-                if extra_address and not student.address:
-                    student.address = extra_address
-                    updated = True
-                if extra_class and not student.current_class:
-                    student.current_class = extra_class
-                    updated = True
-                if extra_school and not student.school_name:
-                    student.school_name = extra_school
-                    updated = True
-                if updated:
-                    student.save()
-                if created:
-                    enrolled += 1
-
             return Response({
-                'detail': f'Enrolled {enrolled} students.',
-                'errors': errors,
+                'detail': f'Student is already enrolled in this course.',
             })
 
 

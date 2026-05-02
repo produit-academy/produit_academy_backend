@@ -333,9 +333,32 @@ class PublicCourseListView(generics.ListAPIView):
     serializer_class = CourseSerializer
 
     def get_queryset(self):
-        return Course.objects.filter(is_active=True).annotate(
+        qs = Course.objects.filter(is_active=True).annotate(
             _student_count=Count('enrollments')
         ).order_by('name')
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(name__icontains=search)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page_size = int(request.query_params.get('page_size', 20))
+        page_num = int(request.query_params.get('page', 1))
+
+        total = queryset.count()
+        start = (page_num - 1) * page_size
+        end = start + page_size
+        page_data = queryset[start:end]
+
+        serializer = self.get_serializer(page_data, many=True)
+        return Response({
+            'results': serializer.data,
+            'count': total,
+            'page': page_num,
+            'page_size': page_size,
+            'has_next': end < total,
+        })
 
 
 class AdminCourseListCreateView(generics.ListCreateAPIView):

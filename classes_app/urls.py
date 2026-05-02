@@ -23,11 +23,14 @@ from .views import (
     AdminUserAnalyticsView,
     ScheduleDemoView, TeacherDemoLinkView, AcceptDemoView, RejectDemoView,
     BookSessionView, CompleteSessionView,
+    ClassesProfileView, ClassesChangePasswordView,
 )
 
 urlpatterns = [
     # Auth & Config
     path('me/', ClassesMeView.as_view(), name='classes-me'),
+    path('profile/', ClassesProfileView.as_view(), name='classes-profile'),
+    path('change-password/', ClassesChangePasswordView.as_view(), name='classes-change-password'),
 
     # Public Data
     path('courses/', PublicCourseListView.as_view(), name='classes-public-courses'),

@@ -157,8 +157,13 @@ class TeacherDashboardView(APIView):
             assigned_teacher=user, platform='classes', role='student'
         ).order_by('first_name')
 
-        # All active courses for dropdowns
-        courses = Course.objects.filter(is_active=True)
+        # Only courses this teacher is assigned to (via TeacherProfile subjects)
+        from .models import TeacherProfile
+        try:
+            teacher_profile = TeacherProfile.objects.get(user=user)
+            courses = teacher_profile.subjects.filter(is_active=True)
+        except TeacherProfile.DoesNotExist:
+            courses = Course.objects.none()
 
         # Upcoming scheduled classes
         upcoming = ClassSession.objects.filter(
@@ -328,7 +333,9 @@ class PublicCourseListView(generics.ListAPIView):
     serializer_class = CourseSerializer
 
     def get_queryset(self):
-        return Course.objects.filter(is_active=True).order_by('name')
+        return Course.objects.filter(is_active=True).annotate(
+            _student_count=Count('enrollments')
+        ).order_by('name')
 
 
 class AdminCourseListCreateView(generics.ListCreateAPIView):
@@ -989,4 +996,82 @@ class CompleteSessionView(APIView):
             return Response({'message': 'Session marked as completed.'})
         except ClassSession.DoesNotExist:
             return Response({'error': 'Session not found'}, status=404)
+
+
+# ============================================================
+# PROFILE & PASSWORD MANAGEMENT
+# ============================================================
+
+class ClassesProfileView(APIView):
+    """View and update own profile for any classes platform user."""
+    permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
+
+    def get(self, request):
+        user = request.user
+        data = {
+            'id': user.id,
+            'email': user.email,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'phone_number': user.phone_number or '',
+            'role': 'admin' if user.is_staff or user.is_superuser else user.role,
+            'platform': user.platform,
+            'college': user.college or '',
+            'address': user.address or '',
+            'current_class': user.current_class or '',
+            'school_name': user.school_name or '',
+            'date_joined': user.date_joined.isoformat(),
+        }
+
+        # Add role-specific info
+        if user.role == 'teacher':
+            from .models import TeacherProfile
+            try:
+                tp = TeacherProfile.objects.get(user=user)
+                data['subjects'] = list(tp.subjects.filter(is_active=True).values('id', 'name'))
+            except TeacherProfile.DoesNotExist:
+                data['subjects'] = []
+        elif user.role == 'student':
+            enrollments = Enrollment.objects.filter(student=user).select_related('course')
+            data['courses'] = [{'id': e.course.id, 'name': e.course.name, 'is_completed': e.is_completed} for e in enrollments]
+            if user.assigned_mentor:
+                m = user.assigned_mentor
+                data['mentor'] = {'id': m.id, 'name': f"{m.first_name} {m.last_name}".strip(), 'email': m.email}
+            if user.assigned_teacher:
+                t = user.assigned_teacher
+                data['teacher'] = {'id': t.id, 'name': f"{t.first_name} {t.last_name}".strip(), 'email': t.email}
+
+        return Response(data)
+
+    def patch(self, request):
+        user = request.user
+        allowed_fields = ['first_name', 'last_name', 'phone_number', 'college', 'address', 'current_class', 'school_name']
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(user, field, request.data[field])
+        user.save()
+        return Response({'message': 'Profile updated successfully.'})
+
+
+class ClassesChangePasswordView(APIView):
+    """Change password for any authenticated classes user."""
+    permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
+
+    def post(self, request):
+        user = request.user
+        current = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+
+        if not current or not new_password:
+            return Response({'error': 'Both current_password and new_password are required.'}, status=400)
+
+        if not user.check_password(current):
+            return Response({'error': 'Current password is incorrect.'}, status=400)
+
+        if len(new_password) < 8:
+            return Response({'error': 'New password must be at least 8 characters.'}, status=400)
+
+        user.set_password(new_password)
+        user.save()
+        return Response({'message': 'Password changed successfully.'})
 

@@ -18,7 +18,7 @@ from .serializers import (
 
 # --- EMAIL HELPER FUNCTION ---
 
-def send_html_email(subject, recipient_email, username, otp=None, type='reset', **kwargs): 
+def send_html_email(subject, recipient_email, username, otp=None, type='reset', from_email=None, **kwargs): 
     if type == 'reset':
         title = "Password Reset Request"
         intro = "We received a request to reset the password for your account."
@@ -34,6 +34,9 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
     elif type == 'staff_welcome':
         title = "Contract Approved!"
         intro = f"Your account is now verified. You can log in using your email."
+    elif type == 'staff_credentials':
+        title = "Your Account is Ready!"
+        intro = "Your account has been approved and is ready to use. Below are your login credentials."
     elif type == 'demo_alert':
         title = "Action Required: Demo Link Needed"
         intro = f"You have a new Demo Class scheduled with {kwargs.get('student_name', 'a student')}. Please log in and provide a meeting link."
@@ -108,12 +111,31 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
                     <p><strong>Time:</strong> {kwargs.get('time', 'TBA')}</p>
                     <p>Log in to your mentor dashboard to view the session.</p>
         """
+    elif type == 'staff_credentials':
+        password = kwargs.get('password', '')
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>{intro}</p>
+                    
+                    <div style="background-color: #f8fafc; border-left: 4px solid #0070f3; padding: 15px 20px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">Your Login Credentials</h3>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Login URL:</strong> <a href="https://classes.produitacademy.com/login" style="color: #0070f3;">classes.produitacademy.com/login</a></p>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Email:</strong> {recipient_email}</p>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Password:</strong> <code style="background: #e2e8f0; padding: 2px 8px; border-radius: 4px; font-size: 15px;">{password}</code></p>
+                    </div>
+                    
+                    <p style="color: #666; font-size: 13px;">⚠️ Please change your password after your first login for security.</p>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="https://classes.produitacademy.com/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Log In Now</a>
+                    </div>
+        """
     else:
         message_body = f"""
                     <p>Hi <strong>{username}</strong>,</p>
                     <p>{intro}</p>
                     <div style="text-align: center; margin: 30px 0;">
-                        <a href="https://produitacademy.com/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Log In Now</a>
+                        <a href="https://classes.produitacademy.com/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Log In Now</a>
                     </div>
         """
 
@@ -167,7 +189,7 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
     send_mail(
         subject,
         plain_message,
-        settings.DEFAULT_FROM_EMAIL,
+        from_email or settings.DEFAULT_FROM_EMAIL,
         [recipient_email],
         html_message=html_content,
         fail_silently=False,

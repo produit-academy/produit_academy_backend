@@ -11,6 +11,9 @@ class CourseSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'description', 'student_count', 'is_active', 'created_at']
 
     def get_student_count(self, obj):
+        # Use annotated value if available, otherwise fallback to query
+        if hasattr(obj, '_student_count'):
+            return obj._student_count
         return obj.enrollments.count()
 
 

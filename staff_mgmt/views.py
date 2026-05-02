@@ -9,6 +9,7 @@ from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskCo
 from classes_app.models import Course, TeacherProfile
 from api.views import send_html_email
 import random
+import string
 from datetime import timedelta
 from .serializers import (
     DepartmentSerializer, StaffProfileSerializer,
@@ -228,11 +229,12 @@ class StaffSignUpView(generics.CreateAPIView):
         StaffProfile.objects.create(**profile_data)
 
         return Response({'message': 'Staff account created', 'user_id': user.id, 'email': user.email}, status=201)
-
-
 # ============================================================
 # HR ONBOARDING FOR CLASSES STAFF
 # ============================================================
+
+HR_FROM_EMAIL = 'Produit Academy HR <hr@produitacademy.com>'
+
 
 class OnboardStaffView(APIView):
     permission_classes = [IsAuthenticated]
@@ -245,15 +247,25 @@ class OnboardStaffView(APIView):
             platform='classes', role__in=['teacher', 'mentor']
         ).order_by('-date_joined')
 
+        # Prefetch teacher profiles with subjects to avoid N+1
+        teacher_profiles = {}
+        for tp in TeacherProfile.objects.filter(
+            user__in=staff
+        ).prefetch_related('subjects').select_related('user'):
+            teacher_profiles[tp.user_id] = list(tp.subjects.values('id', 'name'))
+
         data = [{
             'id': u.id,
             'email': u.email,
             'first_name': u.first_name,
             'last_name': u.last_name,
+            'phone_number': u.phone_number or '',
             'role': u.role,
             'is_verified': u.is_verified,
+            'is_active': u.is_active,
             'date_joined': u.date_joined.isoformat(),
             'has_signed': u.otp is None,  # OTP cleared = agreement signed
+            'subjects': teacher_profiles.get(u.id, []),
         } for u in staff]
 
         return Response(data)
@@ -265,6 +277,9 @@ class OnboardStaffView(APIView):
         email = request.data.get('email')
         role = request.data.get('role') # 'teacher' or 'mentor'
         subjects = request.data.get('subjects', []) # list of course IDs
+        first_name = request.data.get('first_name', '')
+        last_name = request.data.get('last_name', '')
+        phone_number = request.data.get('phone_number', '')
 
         if not email or role not in ['teacher', 'mentor']:
             return Response({'error': 'Valid email and role (teacher/mentor) required.'}, status=400)
@@ -275,6 +290,9 @@ class OnboardStaffView(APIView):
         otp = str(random.randint(100000, 999999))
         user = User.objects.create_user(
             username=email, email=email,
+            first_name=first_name,
+            last_name=last_name,
+            phone_number=phone_number,
             role=role, platform='classes',
             is_verified=False,
             otp=otp,
@@ -287,11 +305,61 @@ class OnboardStaffView(APIView):
                 profile.subjects.set(Course.objects.filter(id__in=subjects))
                 
         try:
-            send_html_email('Welcome to Produit Academy Classes', user.email, user.email.split('@')[0], otp, type='staff_otp')
+            send_html_email(
+                'Welcome to Produit Academy Classes',
+                user.email,
+                f"{first_name} {last_name}".strip() or user.email.split('@')[0],
+                otp,
+                type='staff_otp',
+                from_email=HR_FROM_EMAIL,
+            )
         except Exception:
             pass
             
         return Response({'message': f'{role.capitalize()} onboarded successfully.', 'user_id': user.id}, status=201)
+
+
+class OnboardStaffDetailView(APIView):
+    """Edit or delete an onboarded teacher/mentor."""
+    permission_classes = [IsAuthenticated]
+
+    def get_staff_user(self, pk):
+        try:
+            return User.objects.get(pk=pk, platform='classes', role__in=['teacher', 'mentor'])
+        except User.DoesNotExist:
+            return None
+
+    def patch(self, request, pk):
+        if not (is_admin(request.user) or request.user.role == 'staff'):
+            return Response({'error': 'Permission denied.'}, status=403)
+
+        user = self.get_staff_user(pk)
+        if not user:
+            return Response({'error': 'Staff member not found.'}, status=404)
+
+        # Update user fields
+        for field in ['first_name', 'last_name', 'phone_number', 'email']:
+            if field in request.data:
+                setattr(user, field, request.data[field])
+        user.save()
+
+        # Update subjects if teacher
+        if user.role == 'teacher' and 'subjects' in request.data:
+            profile, _ = TeacherProfile.objects.get_or_create(user=user)
+            profile.subjects.set(Course.objects.filter(id__in=request.data['subjects']))
+
+        return Response({'message': 'Staff details updated successfully.'})
+
+    def delete(self, request, pk):
+        if not (is_admin(request.user) or request.user.role == 'staff'):
+            return Response({'error': 'Permission denied.'}, status=403)
+
+        user = self.get_staff_user(pk)
+        if not user:
+            return Response({'error': 'Staff member not found.'}, status=404)
+
+        user.delete()
+        return Response({'message': 'Staff member deleted successfully.'})
 
 
 class ApproveStaffView(APIView):
@@ -306,16 +374,28 @@ class ApproveStaffView(APIView):
             user = User.objects.get(id=user_id, role__in=['teacher', 'mentor'])
             if user.is_verified:
                 return Response({'message': 'User already verified.'}, status=400)
-                
+
+            # Generate random password
+            raw_password = 'PA-' + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            user.set_password(raw_password)
             user.is_verified = True
             user.save()
             
+            display_name = f"{user.first_name} {user.last_name}".strip() or user.email.split('@')[0]
+            
             try:
-                send_html_email('Contract Approved', user.email, user.email.split('@')[0], type='staff_welcome')
+                send_html_email(
+                    'Your Produit Academy Account is Ready!',
+                    user.email,
+                    display_name,
+                    type='staff_credentials',
+                    from_email=HR_FROM_EMAIL,
+                    password=raw_password,
+                )
             except Exception:
                 pass
                 
-            return Response({'message': 'Staff approved and verified successfully.'})
+            return Response({'message': 'Staff approved. Login credentials sent via email.'})
         except User.DoesNotExist:
             return Response({'error': 'User not found.'}, status=404)
 

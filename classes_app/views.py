@@ -364,8 +364,35 @@ class PublicCourseListView(generics.ListAPIView):
 
 class AdminCourseListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAdminUser]
-    queryset = Course.objects.all().order_by('-created_at')
     serializer_class = CourseSerializer
+
+    def get_queryset(self):
+        qs = Course.objects.all().annotate(
+            _student_count=Count('enrollments')
+        ).order_by('-created_at')
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(name__icontains=search)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page_size = int(request.query_params.get('page_size', 20))
+        page_num = int(request.query_params.get('page', 1))
+
+        total = queryset.count()
+        start = (page_num - 1) * page_size
+        end = start + page_size
+        page_data = queryset[start:end]
+
+        serializer = self.get_serializer(page_data, many=True)
+        return Response({
+            'results': serializer.data,
+            'count': total,
+            'page': page_num,
+            'page_size': page_size,
+            'has_next': end < total,
+        })
 
 
 class AdminCourseDetailView(generics.RetrieveUpdateDestroyAPIView):

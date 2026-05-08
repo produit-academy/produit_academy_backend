@@ -10,7 +10,7 @@ class Branch(models.Model):
         return self.name
 
 class User(AbstractUser):
-    ROLE_CHOICES = (('student', 'Student'), ('admin', 'Admin'), ('mentor', 'Mentor'), ('teacher', 'Teacher'), ('staff', 'Staff'))
+    ROLE_CHOICES = (('student', 'Student'), ('admin', 'Admin'), ('mentor', 'Mentor'), ('teacher', 'Teacher'), ('staff', 'Staff'), ('manager', 'Manager'))
     PLATFORM_CHOICES = (('gate', 'GATE'), ('classes', 'Classes'))
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
@@ -214,7 +214,7 @@ class StaffTask(models.Model):
     due_date = models.DateField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(blank=True, null=True)
-
+    payment_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     def __str__(self):
         return f"{self.title} → {self.assigned_to.email} [{self.status}]"
 
@@ -227,3 +227,40 @@ class TaskComment(models.Model):
 
     def __str__(self):
         return f"Comment by {self.author.email} on Task {self.task.id}"
+    
+# --- WALLET MODELS ---
+
+class StaffWallet(models.Model):
+    staff = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='wallet',
+        limit_choices_to={'role': 'staff'}
+    )
+    total_earned = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    total_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def balance(self):
+        return self.total_earned - self.total_paid
+
+    def __str__(self):
+        return f"Wallet - {self.staff.email} | Balance: {self.balance}"
+
+
+class WalletTransaction(models.Model):
+    TYPE_CHOICES = (
+        ('credit', 'Credit'),
+        ('debit', 'Debit'),
+    )
+    wallet = models.ForeignKey(StaffWallet, on_delete=models.CASCADE, related_name='transactions')
+    task = models.ForeignKey(StaffTask, on_delete=models.SET_NULL, null=True, blank=True, related_name='payment')
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    note = models.CharField(max_length=200, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.type} ₹{self.amount} - {self.wallet.staff.email}"

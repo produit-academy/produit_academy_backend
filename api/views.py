@@ -18,7 +18,8 @@ from .models import (
     User, Branch, StudyMaterial, CourseRequest, Session,
     Question, Choice, MockTest, MockTestQuestion,
     Complaint, ContactInquiry,
-    StaffProfile, StaffTask, TaskComment
+    StaffProfile, StaffTask, TaskComment,
+       StaffWallet, WalletTransaction
 )
 from .serializers import (
     UserSerializer, CourseRequestSerializer, StudyMaterialSerializer,
@@ -28,7 +29,8 @@ from .serializers import (
     MockTestSessionSerializer, MockTestSubmitSerializer, MockTestResultSummarySerializer,
     MockTestHistorySerializer, ComplaintSerializer, ContactInquirySerializer,
     MockTestQuestionReviewSerializer,
-    StaffProfileSerializer, StaffTaskSerializer, TaskCommentSerializer
+    StaffProfileSerializer, StaffTaskSerializer, TaskCommentSerializer,
+    StaffWalletSerializer, WalletTransactionSerializer
 )
 
 # --- EMAIL HELPER FUNCTION ---
@@ -906,3 +908,243 @@ class AdminTaskDetailView(generics.RetrieveUpdateDestroyAPIView):
             return StaffTask.objects.get(pk=self.kwargs['pk'])
         except StaffTask.DoesNotExist:
             raise NotFound('Task not found.')
+        
+# --- MANAGER VIEWS ---
+
+class ManagerSignUpView(APIView):
+    """Admin creates a manager/HR account"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role != 'admin' and not request.user.is_superuser:
+            return Response({'error': 'Only admins can create manager accounts'}, status=403)
+
+        email = request.data.get('email')
+        password = request.data.get('password')
+        first_name = request.data.get('first_name', '')
+        last_name = request.data.get('last_name', '')
+        phone_number = request.data.get('phone_number', '')
+        designation = request.data.get('designation', '')
+
+        if not email or not password:
+            return Response({'error': 'Email and password are required'}, status=400)
+
+        if User.objects.filter(email=email).exists():
+            return Response({'error': 'User with this email already exists'}, status=400)
+
+        user = User.objects.create_user(
+            username=email,
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name,
+            phone_number=phone_number,
+            role='manager',
+            is_verified=True
+        )
+
+        return Response({
+            'message': 'Manager account created successfully',
+            'user_id': user.id,
+            'email': user.email,
+            'role': user.role
+        }, status=201)
+
+
+class ManagerStaffListView(generics.ListAPIView):
+    """Manager can see all staff members"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffProfileSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Access denied.')
+        return StaffProfile.objects.select_related('user').all()
+
+
+class ManagerTaskCreateView(generics.CreateAPIView):
+    """Manager assigns a task to a staff member"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffTaskSerializer
+
+    def perform_create(self, serializer):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Only admins or managers can assign tasks.')
+        serializer.save(assigned_by=self.request.user)
+
+
+class ManagerTaskListView(generics.ListAPIView):
+    """Manager can see all tasks or filter by staff"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffTaskSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Access denied.')
+        staff_id = self.request.query_params.get('staff_id')
+        if staff_id:
+            return StaffTask.objects.filter(assigned_to_id=staff_id).order_by('-created_at')
+        return StaffTask.objects.all().order_by('-created_at')
+
+
+class ManagerTaskDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Manager can view, edit or delete any task"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffTaskSerializer
+
+    def get_object(self):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Access denied.')
+        try:
+            return StaffTask.objects.get(pk=self.kwargs['pk'])
+        except StaffTask.DoesNotExist:
+            raise NotFound('Task not found.')
+
+
+class ManagerCommentView(generics.ListCreateAPIView):
+    """Manager can view and add comments on any task"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = TaskCommentSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Access denied.')
+        return TaskComment.objects.filter(task_id=self.kwargs['pk']).order_by('created_at')
+
+    def perform_create(self, serializer):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Access denied.')
+        try:
+            task = StaffTask.objects.get(pk=self.kwargs['pk'])
+        except StaffTask.DoesNotExist:
+            raise NotFound('Task not found.')
+        serializer.save(author=self.request.user, task=task)
+
+
+# --- WALLET VIEWS ---
+
+class StaffWalletView(generics.RetrieveAPIView):
+    """Staff views their own wallet"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffWalletSerializer
+
+    def get_object(self):
+        if self.request.user.role != 'staff':
+            raise PermissionDenied('Only staff can access this.')
+        wallet, created = StaffWallet.objects.get_or_create(staff=self.request.user)
+        return wallet
+
+
+class ManagerWalletListView(generics.ListAPIView):
+    """Manager/Admin sees all staff wallets"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffWalletSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Access denied.')
+        return StaffWallet.objects.select_related('staff').all()
+
+
+class ManagerWalletDetailView(generics.RetrieveAPIView):
+    """Manager views a specific staff wallet"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StaffWalletSerializer
+
+    def get_object(self):
+        if self.request.user.role not in ['admin', 'manager'] and not self.request.user.is_superuser:
+            raise PermissionDenied('Access denied.')
+        try:
+            return StaffWallet.objects.get(staff_id=self.kwargs['pk'])
+        except StaffWallet.DoesNotExist:
+            raise NotFound('Wallet not found.')
+
+
+class MarkTaskPaidView(APIView):
+    """Manager marks a completed task as paid — credits staff wallet"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in ['admin', 'manager'] and not request.user.is_superuser:
+            return Response({'error': 'Access denied.'}, status=403)
+
+        try:
+            task = StaffTask.objects.get(pk=pk)
+        except StaffTask.DoesNotExist:
+            return Response({'error': 'Task not found.'}, status=404)
+
+        if task.status != 'completed':
+            return Response({'error': 'Task must be completed before payment.'}, status=400)
+
+        if task.payment_amount <= 0:
+            return Response({'error': 'Set a payment amount on the task first.'}, status=400)
+
+        # Get or create wallet
+        wallet, _ = StaffWallet.objects.get_or_create(staff=task.assigned_to)
+
+        # Check if already paid
+        already_paid = WalletTransaction.objects.filter(task=task, type='credit').exists()
+        if already_paid:
+            return Response({'error': 'This task has already been paid.'}, status=400)
+
+        # Credit wallet
+        wallet.total_earned += task.payment_amount
+        wallet.save()
+
+        WalletTransaction.objects.create(
+            wallet=wallet,
+            task=task,
+            type='credit',
+            amount=task.payment_amount,
+            note=f'Payment for: {task.title}'
+        )
+
+        return Response({
+            'message': f'₹{task.payment_amount} credited to {task.assigned_to.email}',
+            'new_balance': wallet.balance,
+            'total_earned': wallet.total_earned
+        }, status=200)
+
+
+class DebitWalletView(APIView):
+    """Manager manually debits (marks as paid out) from staff wallet"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in ['admin', 'manager'] and not request.user.is_superuser:
+            return Response({'error': 'Access denied.'}, status=403)
+
+        try:
+            wallet = StaffWallet.objects.get(staff_id=pk)
+        except StaffWallet.DoesNotExist:
+            return Response({'error': 'Wallet not found.'}, status=404)
+
+        amount = request.data.get('amount')
+        note = request.data.get('note', 'Manual payment')
+
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return Response({'error': 'Invalid amount.'}, status=400)
+
+        if amount <= 0:
+            return Response({'error': 'Amount must be greater than 0.'}, status=400)
+
+        if wallet.balance < amount:
+            return Response({'error': 'Insufficient balance.'}, status=400)
+
+        wallet.total_paid += amount
+        wallet.save()
+
+        WalletTransaction.objects.create(
+            wallet=wallet,
+            type='debit',
+            amount=amount,
+            note=note
+        )
+
+        return Response({
+            'message': f'₹{amount} debited from {wallet.staff.email}',
+            'new_balance': wallet.balance,
+            'total_paid': wallet.total_paid
+        }, status=200)

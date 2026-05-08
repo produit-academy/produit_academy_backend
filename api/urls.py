@@ -45,12 +45,14 @@ urlpatterns = [
     path('contact/', ContactInquiryView.as_view(), name='contact-inquiry'),
     path('admin/contacts/', AdminContactListView.as_view(), name='admin-contact-list'),
     path('admin/contacts/<int:pk>/', AdminContactUpdateView.as_view(), name='admin-contact-update'),
+
     # --- Staff Routes ---
     path('staff/signup/', StaffSignUpView.as_view(), name='staff-signup'),
     path('staff/profile/', StaffProfileView.as_view(), name='staff-profile'),
     path('staff/tasks/', StaffTaskListView.as_view(), name='staff-tasks'),
     path('staff/tasks/<int:pk>/update/', StaffTaskUpdateView.as_view(), name='staff-task-update'),
     path('staff/tasks/<int:pk>/comments/', TaskCommentView.as_view(), name='task-comments'),
+    path('staff/wallet/', StaffWalletView.as_view(), name='staff-wallet'),
 
     # --- Admin Staff Management Routes ---
     path('admin/staff/', AdminStaffListView.as_view(), name='admin-staff-list'),
@@ -58,6 +60,15 @@ urlpatterns = [
     path('admin/staff/tasks/', AdminTaskListView.as_view(), name='admin-task-list'),
     path('admin/staff/tasks/<int:pk>/', AdminTaskDetailView.as_view(), name='admin-task-detail'),
 
+    # --- Manager Routes ---
+    path('manager/signup/', ManagerSignUpView.as_view(), name='manager-signup'),
+    path('manager/staff/', ManagerStaffListView.as_view(), name='manager-staff-list'),
+    path('manager/tasks/create/', ManagerTaskCreateView.as_view(), name='manager-task-create'),
+    path('manager/tasks/', ManagerTaskListView.as_view(), name='manager-task-list'),
+    path('manager/tasks/<int:pk>/', ManagerTaskDetailView.as_view(), name='manager-task-detail'),
+    path('manager/tasks/<int:pk>/comments/', ManagerCommentView.as_view(), name='manager-task-comments'),
+    path('manager/tasks/<int:pk>/pay/', MarkTaskPaidView.as_view(), name='mark-task-paid'),
+    path('manager/wallets/', ManagerWalletListView.as_view(), name='manager-wallet-list'),
+    path('manager/wallets/<int:pk>/', ManagerWalletDetailView.as_view(), name='manager-wallet-detail'),
+    path('manager/wallets/<int:pk>/debit/', DebitWalletView.as_view(), name='debit-wallet'),
 ]
-
-

@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
-from .models import User, Branch, StudyMaterial, CourseRequest, Session, Question, Choice, MockTest, MockTestQuestion, Complaint, ContactInquiry, StaffProfile, StaffTask, TaskComment
+from .models import User, Branch, StudyMaterial, CourseRequest, Session, Question, Choice, MockTest, MockTestQuestion, Complaint, ContactInquiry, StaffProfile, StaffTask, TaskComment,StaffWallet, WalletTransaction
 
 # --- AUTH & CORE SERIALIZERS (Unchanged) ---
 
@@ -311,3 +311,27 @@ class StaffTaskSerializer(serializers.ModelSerializer):
             'comments'
         ]
         read_only_fields = ['created_at', 'assigned_by', 'assigned_by_email', 'assigned_to_email']
+
+# --- WALLET SERIALIZERS ---
+
+class WalletTransactionSerializer(serializers.ModelSerializer):
+    task_title = serializers.CharField(source='task.title', read_only=True, default=None)
+
+    class Meta:
+        model = WalletTransaction
+        fields = ['id', 'type', 'amount', 'note', 'task_title', 'created_at']
+        read_only_fields = ['created_at']
+
+
+class StaffWalletSerializer(serializers.ModelSerializer):
+    transactions = WalletTransactionSerializer(many=True, read_only=True)
+    balance = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    staff_email = serializers.EmailField(source='staff.email', read_only=True)
+    staff_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StaffWallet
+        fields = ['id', 'staff_email', 'staff_name', 'total_earned', 'total_paid', 'balance', 'transactions', 'updated_at']
+
+    def get_staff_name(self, obj):
+        return f"{obj.staff.first_name} {obj.staff.last_name}".strip() or obj.staff.email

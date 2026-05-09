@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskComment
+from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskComment, StaffWallet, WalletTransaction
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -49,18 +49,26 @@ class TaskCommentSerializer(serializers.ModelSerializer):
 class StaffTaskSerializer(serializers.ModelSerializer):
     comments = TaskCommentSerializer(many=True, read_only=True)
     assigned_to_email = serializers.EmailField(source='assigned_to.email', read_only=True)
+    assigned_to_name = serializers.SerializerMethodField()
     assigned_by_email = serializers.EmailField(source='assigned_by.email', read_only=True)
+    is_paid = serializers.SerializerMethodField()
 
     class Meta:
         model = StaffTask
         fields = [
             'id', 'title', 'description', 'status', 'remarks',
             'due_date', 'created_at', 'completed_at',
-            'assigned_to', 'assigned_to_email',
+            'assigned_to', 'assigned_to_email', 'assigned_to_name',
             'assigned_by', 'assigned_by_email',
-            'comments'
+            'payment_amount', 'comments', 'is_paid'
         ]
-        read_only_fields = ['created_at', 'assigned_by', 'assigned_by_email', 'assigned_to_email']
+        read_only_fields = ['created_at', 'assigned_by', 'assigned_by_email', 'assigned_to_email', 'assigned_to_name', 'is_paid']
+
+    def get_assigned_to_name(self, obj):
+        return f"{obj.assigned_to.first_name} {obj.assigned_to.last_name}".strip() or obj.assigned_to.email
+
+    def get_is_paid(self, obj):
+        return obj.payment.filter(type='credit').exists()
 
 
 class SuperAdminUserSerializer(serializers.ModelSerializer):
@@ -88,3 +96,71 @@ class SuperAdminUserSerializer(serializers.ModelSerializer):
             return obj.staff_profile.designation
         except Exception:
             return None
+
+
+# --- WALLET SERIALIZERS ---
+
+class WalletTransactionSerializer(serializers.ModelSerializer):
+    task_title = serializers.CharField(source='task.title', read_only=True, default=None)
+
+    class Meta:
+        model = WalletTransaction
+        fields = ['id', 'type', 'amount', 'note', 'task_title', 'created_at']
+        read_only_fields = ['created_at']
+
+
+class StaffWalletSerializer(serializers.ModelSerializer):
+    transactions = WalletTransactionSerializer(many=True, read_only=True)
+    balance = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    staff_email = serializers.EmailField(source='staff.email', read_only=True)
+    staff_name = serializers.SerializerMethodField()
+    staff_role = serializers.CharField(source='staff.role', read_only=True)
+
+    class Meta:
+        model = StaffWallet
+        fields = ['id', 'staff', 'staff_email', 'staff_name', 'staff_role',
+                  'total_earned', 'total_paid', 'balance', 'transactions', 'updated_at']
+
+    def get_staff_name(self, obj):
+        return f"{obj.staff.first_name} {obj.staff.last_name}".strip() or obj.staff.email
+
+
+class ManagerStaffSerializer(serializers.ModelSerializer):
+    """Serializer for manager to see all staff/teachers/mentors."""
+    full_name = serializers.SerializerMethodField()
+    department_name = serializers.SerializerMethodField()
+    designation = serializers.SerializerMethodField()
+    task_count = serializers.SerializerMethodField()
+    wallet_balance = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'full_name', 'role', 'phone_number',
+            'department_name', 'designation', 'is_active',
+            'task_count', 'wallet_balance', 'date_joined',
+        ]
+
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.email
+
+    def get_department_name(self, obj):
+        try:
+            return obj.staff_profile.department.name if obj.staff_profile.department else None
+        except Exception:
+            return None
+
+    def get_designation(self, obj):
+        try:
+            return obj.staff_profile.designation
+        except Exception:
+            return obj.get_role_display()
+
+    def get_task_count(self, obj):
+        return obj.assigned_tasks.count()
+
+    def get_wallet_balance(self, obj):
+        try:
+            return str(obj.wallet.balance)
+        except Exception:
+            return '0.00'

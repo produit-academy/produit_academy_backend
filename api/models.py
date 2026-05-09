@@ -10,7 +10,7 @@ class Branch(models.Model):
         return self.name
 
 class User(AbstractUser):
-    ROLE_CHOICES = (('student', 'Student'), ('admin', 'Admin'), ('mentor', 'Mentor'), ('teacher', 'Teacher'), ('staff', 'Staff'))
+    ROLE_CHOICES = (('student', 'Student'), ('admin', 'Admin'), ('mentor', 'Mentor'), ('teacher', 'Teacher'), ('staff', 'Staff'), ('manager', 'Manager'))
     PLATFORM_CHOICES = (('gate', 'GATE'), ('classes', 'Classes'))
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
@@ -165,7 +165,9 @@ class ContactInquiry(models.Model):
     course = models.CharField(max_length=100) # This will store the Exam Category
     message = models.TextField()
     status = models.CharField(max_length=20, choices=(('Pending', 'Pending'), ('Resolved', 'Resolved')), default='Pending')
+    resolution_comment = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.name} - {self.course}"
@@ -190,7 +192,7 @@ class StaffProfile(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='staff_profile',
-        limit_choices_to={'role': 'staff'}
+        limit_choices_to={'role__in': ['staff', 'manager']}
     )
     department = models.ForeignKey(
         Department, on_delete=models.SET_NULL,
@@ -220,14 +222,12 @@ class StaffTask(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='assigned_tasks',
-        limit_choices_to={'role': 'staff'}
     )
     assigned_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='created_tasks',
-        limit_choices_to={'role': 'admin'}
     )
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)
@@ -236,6 +236,7 @@ class StaffTask(models.Model):
     due_date = models.DateField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(blank=True, null=True)
+    payment_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
 
     def __str__(self):
         return f"{self.title} → {self.assigned_to.email} [{self.status}]"
@@ -249,3 +250,40 @@ class TaskComment(models.Model):
 
     def __str__(self):
         return f"Comment by {self.author.email} on Task {self.task.id}"
+
+
+# --- WALLET MODELS ---
+
+class StaffWallet(models.Model):
+    staff = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='wallet',
+    )
+    total_earned = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    total_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def balance(self):
+        return self.total_earned - self.total_paid
+
+    def __str__(self):
+        return f"Wallet - {self.staff.email} | Balance: {self.balance}"
+
+
+class WalletTransaction(models.Model):
+    TYPE_CHOICES = (
+        ('credit', 'Credit'),
+        ('debit', 'Debit'),
+    )
+    wallet = models.ForeignKey(StaffWallet, on_delete=models.CASCADE, related_name='transactions')
+    task = models.ForeignKey(StaffTask, on_delete=models.SET_NULL, null=True, blank=True, related_name='payment')
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    note = models.CharField(max_length=200, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.type} ₹{self.amount} - {self.wallet.staff.email}"

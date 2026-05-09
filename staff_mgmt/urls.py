@@ -9,7 +9,11 @@ from .views import (
     StaffJobApplicationListView, StaffJobApplicationUpdateView,
     AdminStaffListView, AdminStaffDetailView,
     AdminTaskCreateView, AdminTaskListView, AdminTaskDetailView,
-    OnboardStaffView, OnboardStaffDetailView, ApproveStaffView
+    OnboardStaffView, OnboardStaffDetailView, ApproveStaffView,
+    StaffWalletView,
+    ManagerStaffListView, ManagerTaskCreateView, ManagerTaskListView,
+    ManagerTaskDetailView, ManagerCommentView, MarkTaskPaidView,
+    ManagerWalletListView, ManagerWalletDetailView, ManagerTransactionCreateView,
 )
 
 urlpatterns = [
@@ -41,6 +45,9 @@ urlpatterns = [
     path('staff/module/careers/applications/', StaffJobApplicationListView.as_view(), name='staff-job-applications'),
     path('staff/module/careers/applications/<int:pk>/', StaffJobApplicationUpdateView.as_view(), name='staff-job-application-update'),
 
+    # Staff Wallet
+    path('staff/wallet/', StaffWalletView.as_view(), name='staff-wallet'),
+
     # Admin Staff Management
     path('admin/staff/', AdminStaffListView.as_view(), name='admin-staff-list'),
     path('admin/staff/<int:pk>/', AdminStaffDetailView.as_view(), name='admin-staff-detail'),
@@ -52,4 +59,15 @@ urlpatterns = [
     path('admin/onboard-staff/', OnboardStaffView.as_view(), name='onboard-classes-staff'),
     path('admin/onboard-staff/<int:pk>/', OnboardStaffDetailView.as_view(), name='onboard-staff-detail'),
     path('admin/approve-staff/', ApproveStaffView.as_view(), name='approve-classes-staff'),
+
+    # Manager Routes
+    path('staff/manager/staff/', ManagerStaffListView.as_view(), name='manager-staff-list'),
+    path('staff/manager/tasks/create/', ManagerTaskCreateView.as_view(), name='manager-task-create'),
+    path('staff/manager/tasks/', ManagerTaskListView.as_view(), name='manager-task-list'),
+    path('staff/manager/tasks/<int:pk>/', ManagerTaskDetailView.as_view(), name='manager-task-detail'),
+    path('staff/manager/tasks/<int:pk>/comments/', ManagerCommentView.as_view(), name='manager-task-comments'),
+    path('staff/manager/tasks/<int:pk>/pay/', MarkTaskPaidView.as_view(), name='mark-task-paid'),
+    path('staff/manager/wallets/', ManagerWalletListView.as_view(), name='manager-wallet-list'),
+    path('staff/manager/wallets/<int:pk>/', ManagerWalletDetailView.as_view(), name='manager-wallet-detail'),
+    path('staff/manager/wallets/<int:pk>/transactions/', ManagerTransactionCreateView.as_view(), name='manager-transaction-create'),
 ]

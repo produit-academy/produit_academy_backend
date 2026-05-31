@@ -26,10 +26,6 @@ class User(AbstractUser):
         'self', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='mentored_students', limit_choices_to={'role': 'mentor'}
     )
-    assigned_teacher = models.ForeignKey(
-        'self', on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='taught_students', limit_choices_to={'role': 'teacher'}
-    )
     is_verified = models.BooleanField(default=False)
     otp = models.CharField(max_length=6, blank=True, null=True) 
     otp_expiry = models.DateTimeField(blank=True, null=True)

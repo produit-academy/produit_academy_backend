@@ -59,13 +59,23 @@ class ClassesMeView(APIView):
     def get(self, request):
         user = request.user
         mentor_info = None
-        teacher_info = None
         if user.assigned_mentor:
             m = user.assigned_mentor
             mentor_info = {'id': m.id, 'name': f"{m.first_name} {m.last_name}", 'email': m.email}
-        if user.assigned_teacher:
-            t = user.assigned_teacher
-            teacher_info = {'id': t.id, 'name': f"{t.first_name} {t.last_name}", 'email': t.email}
+
+        # Build per-course teacher list from Enrollments
+        teachers_info = []
+        if user.role == 'student':
+            enrollments = Enrollment.objects.filter(student=user, teacher__isnull=False).select_related('teacher', 'course')
+            for e in enrollments:
+                t = e.teacher
+                teachers_info.append({
+                    'id': t.id,
+                    'name': f"{t.first_name} {t.last_name}".strip(),
+                    'email': t.email,
+                    'course_id': e.course.id,
+                    'course_name': e.course.name,
+                })
 
         return Response({
             'id': user.id,
@@ -78,7 +88,7 @@ class ClassesMeView(APIView):
             'phone_number': user.phone_number,
             'college': user.college,
             'assigned_mentor': mentor_info,
-            'assigned_teacher': teacher_info,
+            'assigned_teachers': teachers_info,
         })
 
 
@@ -122,13 +132,24 @@ class StudentDashboardView(APIView):
 
         # Assigned staff info
         mentor_info = None
-        teacher_info = None
         if user.assigned_mentor:
             m = user.assigned_mentor
             mentor_info = {'id': m.id, 'name': f"{m.first_name} {m.last_name}", 'email': m.email}
-        if user.assigned_teacher:
-            t = user.assigned_teacher
-            teacher_info = {'id': t.id, 'name': f"{t.first_name} {t.last_name}", 'email': t.email}
+
+        # Per-course teacher info from enrollments
+        teachers_info = []
+        enrollments_with_teachers = Enrollment.objects.filter(
+            student=user, teacher__isnull=False
+        ).select_related('teacher', 'course')
+        for e in enrollments_with_teachers:
+            t = e.teacher
+            teachers_info.append({
+                'id': t.id,
+                'name': f"{t.first_name} {t.last_name}".strip(),
+                'email': t.email,
+                'course_id': e.course.id,
+                'course_name': e.course.name,
+            })
 
         data = {
             'upcoming_classes': ClassSessionSerializer(upcoming, many=True).data,
@@ -140,7 +161,7 @@ class StudentDashboardView(APIView):
             'attendance_percentage': pct,
             'courses': CourseSerializer(courses, many=True).data,
             'assigned_mentor': mentor_info,
-            'assigned_teacher': teacher_info,
+            'assigned_teachers': teachers_info,
         }
         return Response(data)
 
@@ -154,9 +175,12 @@ class TeacherDashboardView(APIView):
         user = request.user
         now = timezone.now()
 
-        # Students assigned to this teacher
+        # Students assigned to this teacher (via Enrollment)
+        student_ids = Enrollment.objects.filter(
+            teacher=user
+        ).values_list('student_id', flat=True).distinct()
         assigned_students = User.objects.filter(
-            assigned_teacher=user, platform='classes', role='student'
+            id__in=student_ids, platform='classes', role='student'
         ).order_by('first_name')
 
         # Only courses this teacher is assigned to (via TeacherProfile subjects)
@@ -185,19 +209,24 @@ class TeacherDashboardView(APIView):
             teacher=user, status='Completed'
         ).count()
 
-        # Student info for the list
+        # Student info for the list, including which courses they share with this teacher
         students_data = []
         for student in assigned_students:
             records = AttendanceRecord.objects.filter(student=student)
             total_records = records.count()
             attended = records.filter(status__in=['Present', 'Late']).count()
             pct = round(attended / total_records * 100, 1) if total_records > 0 else 100.0
+            # Courses this teacher teaches this student
+            student_courses = Enrollment.objects.filter(
+                student=student, teacher=user
+            ).select_related('course').values_list('course__name', flat=True)
             students_data.append({
                 'id': student.id,
                 'first_name': student.first_name,
                 'last_name': student.last_name,
                 'email': student.email,
                 'attendance_percentage': pct,
+                'courses': list(student_courses),
             })
 
         data = {
@@ -492,13 +521,17 @@ class AdminBulkEnrollView(APIView):
             student=student, course=course
         )
 
+        # Assign teacher to enrollment if provided
+        if teacher:
+            enrollment = Enrollment.objects.filter(student=student, course=course).first()
+            if enrollment and not enrollment.teacher:
+                enrollment.teacher = teacher
+                enrollment.save()
+
         # Update student profile fields if provided
         updated = False
         if mentor and not student.assigned_mentor:
             student.assigned_mentor = mentor
-            updated = True
-        if teacher and not student.assigned_teacher:
-            student.assigned_teacher = teacher
             updated = True
         if first_name and not student.first_name:
             student.first_name = first_name
@@ -604,7 +637,7 @@ class AdminEnrollmentListView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = Enrollment.objects.select_related(
-            'student', 'student__assigned_mentor', 'student__assigned_teacher', 'course'
+            'student', 'student__assigned_mentor', 'course'
         ).all().order_by('-enrolled_at')
         course_id = self.request.query_params.get('course_id')
         if course_id:
@@ -687,6 +720,7 @@ class AdminAssignStaffView(APIView):
         student_id = request.data.get('student_id')
         mentor_id = request.data.get('mentor_id')
         teacher_id = request.data.get('teacher_id')
+        course_id = request.data.get('course_id')  # Required for teacher assignment
 
         try:
             student = User.objects.get(pk=student_id, role='student')
@@ -702,16 +736,26 @@ class AdminAssignStaffView(APIView):
         elif mentor_id == '':
             student.assigned_mentor = None
 
-        if teacher_id:
+        student.save()
+
+        # Teacher assignment is now per-course via Enrollment
+        if teacher_id and course_id:
             try:
                 teacher = User.objects.get(pk=teacher_id, role='teacher')
-                student.assigned_teacher = teacher
             except User.DoesNotExist:
                 return Response({'detail': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif teacher_id == '':
-            student.assigned_teacher = None
+            enrollment = Enrollment.objects.filter(student=student, course_id=course_id).first()
+            if enrollment:
+                enrollment.teacher = teacher
+                enrollment.save()
+            else:
+                return Response({'detail': 'Student is not enrolled in that course.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif teacher_id == '' and course_id:
+            enrollment = Enrollment.objects.filter(student=student, course_id=course_id).first()
+            if enrollment:
+                enrollment.teacher = None
+                enrollment.save()
 
-        student.save()
         return Response({'detail': 'Staff assignment updated.'})
 
 
@@ -797,8 +841,14 @@ class AdminUserAnalyticsView(APIView):
             }
             if user.assigned_mentor:
                 data['user']['mentor'] = f"{user.assigned_mentor.first_name} {user.assigned_mentor.last_name}"
-            if user.assigned_teacher:
-                data['user']['teacher'] = f"{user.assigned_teacher.first_name} {user.assigned_teacher.last_name}"
+            # Teachers are per-course, list them all
+            teacher_enrollments = Enrollment.objects.filter(
+                student=user, teacher__isnull=False
+            ).select_related('teacher', 'course')
+            data['user']['teachers'] = [
+                {'name': f"{e.teacher.first_name} {e.teacher.last_name}".strip(), 'course': e.course.name}
+                for e in teacher_enrollments
+            ]
 
         elif user.role == 'teacher':
             sessions = ClassSession.objects.filter(teacher=user, status='Completed')
@@ -864,13 +914,8 @@ class ScheduleDemoView(APIView):
         except (User.DoesNotExist, Course.DoesNotExist):
             return Response({'error': 'Invalid student, teacher, or course.'}, status=404)
 
-        # Business rule: 1 teacher = 1 student (exclusive)
-        # Check if this teacher already has an active enrollment with a DIFFERENT student
-        existing = Enrollment.objects.filter(teacher=teacher).exclude(student=student).first()
-        if existing:
-            return Response({
-                'error': f'{teacher.first_name} {teacher.last_name} is already assigned to another student ({existing.student.first_name} {existing.student.last_name}). Each teacher can only have 1 student.'
-            }, status=400)
+        # A teacher can have multiple students — no restriction here.
+        # But check for time conflict when actually booking (handled in BookSessionView).
 
         demo = ClassSession.objects.create(
             student=student,
@@ -922,12 +967,7 @@ class AcceptDemoView(APIView):
             if demo.status != 'Completed':
                 return Response({'error': 'Demo is not completed yet.'}, status=400)
             
-            # Business rule: 1 teacher = 1 student (exclusive)
-            existing = Enrollment.objects.filter(teacher=demo.teacher).exclude(student=request.user).first()
-            if existing:
-                return Response({
-                    'error': f'This teacher is already assigned to another student. Each teacher can only have 1 student.'
-                }, status=400)
+            # Teacher can have multiple students across courses — no restriction here.
 
             # Create enrollment
             enrollment, created = Enrollment.objects.get_or_create(
@@ -967,6 +1007,7 @@ class BookSessionView(APIView):
     def post(self, request):
         course_id = request.data.get('course_id')
         scheduled_time = request.data.get('scheduled_time')
+        duration = int(request.data.get('duration_minutes', 60))
 
         try:
             enrollment = Enrollment.objects.get(student=request.user, course_id=course_id)
@@ -986,6 +1027,7 @@ class BookSessionView(APIView):
 
             requested_date = requested_dt.date()
             requested_time = requested_dt.time()
+            requested_end = requested_dt + timedelta(minutes=duration)
 
             # Check teacher availability for that specific date and time
             matching_slot = TeacherAvailability.objects.filter(
@@ -1000,13 +1042,30 @@ class BookSessionView(APIView):
                     'error': 'The selected time is outside your teacher\'s available hours. Please choose a time within their schedule.'
                 }, status=400)
 
+            # 1-on-1 overlap prevention: check if teacher already has a session at this time
+            overlapping = ClassSession.objects.filter(
+                teacher=teacher,
+                status='Scheduled',
+                scheduled_time__lt=requested_end,
+            ).exclude(
+                # Exclude sessions that end before our start
+                scheduled_time__lte=requested_dt - timedelta(minutes=1)
+            )
+            # More precise: also consider the session's own duration
+            for existing in overlapping:
+                existing_end = existing.scheduled_time + timedelta(minutes=existing.duration_minutes)
+                if requested_dt < existing_end and requested_end > existing.scheduled_time:
+                    return Response({
+                        'error': 'This teacher is already booked at this time with another student. Please choose a different slot.'
+                    }, status=400)
+
             session = ClassSession.objects.create(
                 student=request.user,
                 teacher=teacher,
                 course=enrollment.course,
                 title=f"1-to-1 Class: {enrollment.course.name}",
-                scheduled_time=scheduled_time,
-                duration_minutes=60,
+                scheduled_time=requested_dt,
+                duration_minutes=duration,
                 is_demo=False
             )
             return Response({'message': 'Session booked successfully.', 'session_id': session.id})
@@ -1143,23 +1202,49 @@ class TeacherAvailabilityView(APIView):
 
 
 class StudentTeacherSlotsView(APIView):
-    """Student fetches their assigned teacher's available slots for booking."""
+    """Student fetches their teacher's available slots for a specific course."""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        teacher = request.user.assigned_teacher
-        if not teacher:
-            return Response({'slots': [], 'message': 'No teacher assigned yet.'})
+        course_id = request.query_params.get('course_id')
+        if not course_id:
+            return Response({'slots': [], 'message': 'Please provide a course_id.'})
 
+        enrollment = Enrollment.objects.filter(
+            student=request.user, course_id=course_id
+        ).select_related('teacher').first()
+
+        if not enrollment or not enrollment.teacher:
+            return Response({'slots': [], 'message': 'No teacher assigned for this course yet.'})
+
+        teacher = enrollment.teacher
         today = dt_date.today()
+
+        # Get all availability slots from today onwards
         slots = TeacherAvailability.objects.filter(
             teacher=teacher,
             date__gte=today
         )
+
+        # Subtract times already booked by ANY student with this teacher
+        booked_sessions = ClassSession.objects.filter(
+            teacher=teacher,
+            status='Scheduled',
+            scheduled_time__date__gte=today
+        )
+        booked_ranges = []
+        for s in booked_sessions:
+            booked_ranges.append({
+                'date': s.scheduled_time.date(),
+                'start': s.scheduled_time.time(),
+                'end': (s.scheduled_time + timedelta(minutes=s.duration_minutes)).time(),
+            })
+
         serializer = TeacherAvailabilitySerializer(slots, many=True)
         return Response({
             'teacher_name': f"{teacher.first_name} {teacher.last_name}".strip() or teacher.username,
             'slots': serializer.data,
+            'booked_ranges': booked_ranges,
         })
 
 
@@ -1251,14 +1336,23 @@ class ClassesProfileView(APIView):
             except TeacherProfile.DoesNotExist:
                 data['subjects'] = []
         elif user.role == 'student':
-            enrollments = Enrollment.objects.filter(student=user).select_related('course')
-            data['courses'] = [{'id': e.course.id, 'name': e.course.name, 'is_completed': e.is_completed} for e in enrollments]
+            enrollments = Enrollment.objects.filter(student=user).select_related('course', 'teacher')
+            data['courses'] = [
+                {
+                    'id': e.course.id,
+                    'name': e.course.name,
+                    'is_completed': e.is_completed,
+                    'teacher': {
+                        'id': e.teacher.id,
+                        'name': f"{e.teacher.first_name} {e.teacher.last_name}".strip(),
+                        'email': e.teacher.email
+                    } if e.teacher else None
+                }
+                for e in enrollments
+            ]
             if user.assigned_mentor:
                 m = user.assigned_mentor
                 data['mentor'] = {'id': m.id, 'name': f"{m.first_name} {m.last_name}".strip(), 'email': m.email}
-            if user.assigned_teacher:
-                t = user.assigned_teacher
-                data['teacher'] = {'id': t.id, 'name': f"{t.first_name} {t.last_name}".strip(), 'email': t.email}
 
         return Response(data)
 

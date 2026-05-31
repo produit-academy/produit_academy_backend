@@ -38,7 +38,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         return f"{m.first_name} {m.last_name}" if m else None
 
     def get_teacher_name(self, obj):
-        t = obj.student.assigned_teacher
+        t = obj.teacher
         return f"{t.first_name} {t.last_name}" if t else None
 
 
@@ -147,15 +147,23 @@ class BasicUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'role', 'assigned_mentor', 'assigned_teacher', 'mentor_name', 'teacher_name', 'subjects']
+        fields = ['id', 'first_name', 'last_name', 'email', 'role', 'assigned_mentor', 'mentor_name', 'teacher_name', 'subjects']
 
     def get_mentor_name(self, obj):
         m = obj.assigned_mentor
         return f"{m.first_name} {m.last_name}" if m else None
 
     def get_teacher_name(self, obj):
-        t = obj.assigned_teacher
-        return f"{t.first_name} {t.last_name}" if t else None
+        """For students, get teacher names from enrollments."""
+        if obj.role == 'student':
+            from .models import Enrollment
+            enrollments = Enrollment.objects.filter(student=obj, teacher__isnull=False).select_related('teacher', 'course')
+            if enrollments.exists():
+                return ', '.join(
+                    f"{e.teacher.first_name} {e.teacher.last_name} ({e.course.name})"
+                    for e in enrollments
+                )
+        return None
         
     def get_subjects(self, obj):
         if obj.role == 'teacher' and hasattr(obj, 'classes_teacher_profile'):

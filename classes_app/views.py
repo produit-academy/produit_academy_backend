@@ -1,6 +1,6 @@
 from django.utils import timezone
 from django.db.models import Count, Q, Sum
-from datetime import timedelta
+from datetime import timedelta, datetime, time as dt_time, date as dt_date
 import csv
 import io
 from django.core.mail import send_mail
@@ -12,7 +12,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.exceptions import PermissionDenied
 
 from api.models import User
-from .models import Course, Enrollment, ClassSession, AttendanceRecord
+from .models import Course, Enrollment, ClassSession, AttendanceRecord, TeacherAvailability
 from .serializers import (
     CourseSerializer, EnrollmentSerializer, ClassSessionSerializer,
     AttendanceRecordSerializer, BulkAttendanceSerializer,
@@ -21,6 +21,7 @@ from .serializers import (
     AdminStatsSerializer, BulkEnrollSerializer,
     StaffCreateSerializer, BasicUserSerializer,
     StaffUpdateSerializer, UserUpdateSerializer,
+    TeacherAvailabilitySerializer,
 )
 
 
@@ -319,10 +320,36 @@ class MentorDashboardView(APIView):
         # Sort at-risk by lowest attendance first
         at_risk.sort(key=lambda x: x['attendance_percentage'])
 
+        # Recently cancelled sessions for mentor's students
+        student_ids = assigned_students.values_list('id', flat=True)
+        cancelled_sessions = ClassSession.objects.filter(
+            student_id__in=student_ids,
+            status='Cancelled'
+        ).select_related('course', 'teacher', 'student', 'cancelled_by').order_by('-scheduled_time')[:10]
+
+        cancelled_data = []
+        for s in cancelled_sessions:
+            cancelled_data.append({
+                'id': s.id,
+                'title': s.title,
+                'course_name': s.course.name,
+                'scheduled_time': s.scheduled_time,
+                'cancel_reason': s.cancel_reason or '',
+                'cancelled_by_name': (
+                    f"{s.cancelled_by.first_name} {s.cancelled_by.last_name}".strip()
+                    if s.cancelled_by else 'Unknown'
+                ),
+                'cancelled_by_role': (
+                    'Teacher' if s.cancelled_by and s.cancelled_by == s.teacher else 'Student'
+                ) if s.cancelled_by else 'Unknown',
+                'student_name': f"{s.student.first_name} {s.student.last_name}".strip() if s.student else '',
+            })
+
         data = {
             'total_students': assigned_students.count(),
             'at_risk_students': at_risk,
             'all_students': all_students,
+            'cancelled_sessions': cancelled_data,
         }
         return Response(data)
 
@@ -946,7 +973,33 @@ class BookSessionView(APIView):
             teacher = enrollment.teacher
             if not teacher:
                 return Response({'error': 'No teacher assigned for this course.'}, status=400)
-            
+
+            # Parse the requested time
+            from django.utils.dateparse import parse_datetime
+            requested_dt = parse_datetime(scheduled_time)
+            if not requested_dt:
+                return Response({'error': 'Invalid scheduled_time format.'}, status=400)
+
+            # Make timezone-aware if needed
+            if timezone.is_naive(requested_dt):
+                requested_dt = timezone.make_aware(requested_dt)
+
+            requested_date = requested_dt.date()
+            requested_time = requested_dt.time()
+
+            # Check teacher availability for that specific date and time
+            matching_slot = TeacherAvailability.objects.filter(
+                teacher=teacher,
+                date=requested_date,
+                start_time__lte=requested_time,
+                end_time__gte=requested_time
+            ).first()
+
+            if not matching_slot:
+                return Response({
+                    'error': 'The selected time is outside your teacher\'s available hours. Please choose a time within their schedule.'
+                }, status=400)
+
             session = ClassSession.objects.create(
                 student=request.user,
                 teacher=teacher,
@@ -975,6 +1028,194 @@ class CompleteSessionView(APIView):
         except ClassSession.DoesNotExist:
             return Response({'error': 'Session not found'}, status=404)
 
+
+# ============================================================
+# TEACHER AVAILABILITY & CANCELLATION
+# ============================================================
+
+def _get_next_week_range():
+    """Return (monday, sunday) of the NEXT week from today."""
+    today = dt_date.today()
+    # Monday of next week
+    days_until_next_monday = (7 - today.weekday()) % 7
+    if days_until_next_monday == 0:
+        days_until_next_monday = 7
+    next_monday = today + timedelta(days=days_until_next_monday)
+    next_sunday = next_monday + timedelta(days=6)
+    return next_monday, next_sunday
+
+
+def _is_past_sunday_deadline():
+    """Check if we are past Sunday 6:00 PM (IST / server local time)."""
+    now = timezone.localtime(timezone.now())
+    # Sunday = weekday 6
+    if now.weekday() == 6 and now.hour >= 18:
+        return True
+    return False
+
+
+class TeacherAvailabilityView(APIView):
+    """
+    GET: Returns the teacher's availability slots for the upcoming week.
+    POST: Submit availability slots for the upcoming week (blocked after Sunday 6 PM).
+    """
+    permission_classes = [permissions.IsAuthenticated, IsTeacher]
+
+    def get(self, request):
+        next_monday, next_sunday = _get_next_week_range()
+        # Also include current week availability
+        today = dt_date.today()
+        current_monday = today - timedelta(days=today.weekday())
+        current_sunday = current_monday + timedelta(days=6)
+
+        slots = TeacherAvailability.objects.filter(
+            teacher=request.user,
+            date__gte=current_monday,
+            date__lte=next_sunday
+        )
+        serializer = TeacherAvailabilitySerializer(slots, many=True)
+
+        return Response({
+            'slots': serializer.data,
+            'current_week': {'start': str(current_monday), 'end': str(current_sunday)},
+            'next_week': {'start': str(next_monday), 'end': str(next_sunday)},
+            'deadline_passed': _is_past_sunday_deadline(),
+        })
+
+    def post(self, request):
+        if _is_past_sunday_deadline():
+            return Response({
+                'error': 'The deadline has passed. You can only submit availability before Sunday 6:00 PM.'
+            }, status=400)
+
+        next_monday, next_sunday = _get_next_week_range()
+        slots_data = request.data.get('slots', [])
+
+        if not slots_data:
+            return Response({'error': 'No slots provided.'}, status=400)
+
+        created = 0
+        errors = []
+        for slot in slots_data:
+            slot_date = slot.get('date')
+            start_time = slot.get('start_time')
+            end_time = slot.get('end_time')
+
+            if not all([slot_date, start_time, end_time]):
+                errors.append(f'Missing fields in slot: {slot}')
+                continue
+
+            try:
+                parsed_date = dt_date.fromisoformat(slot_date)
+            except (ValueError, TypeError):
+                errors.append(f'Invalid date: {slot_date}')
+                continue
+
+            if parsed_date < next_monday or parsed_date > next_sunday:
+                errors.append(f'Date {slot_date} is not in next week ({next_monday} to {next_sunday}).')
+                continue
+
+            obj, was_created = TeacherAvailability.objects.update_or_create(
+                teacher=request.user,
+                date=parsed_date,
+                start_time=start_time,
+                defaults={'end_time': end_time}
+            )
+            if was_created:
+                created += 1
+
+        return Response({
+            'message': f'{created} new slot(s) saved successfully.',
+            'errors': errors if errors else None,
+        })
+
+    def delete(self, request):
+        """Delete a specific availability slot."""
+        slot_id = request.data.get('slot_id')
+        if not slot_id:
+            return Response({'error': 'slot_id is required.'}, status=400)
+        try:
+            slot = TeacherAvailability.objects.get(pk=slot_id, teacher=request.user)
+            slot.delete()
+            return Response({'message': 'Slot deleted.'})
+        except TeacherAvailability.DoesNotExist:
+            return Response({'error': 'Slot not found.'}, status=404)
+
+
+class StudentTeacherSlotsView(APIView):
+    """Student fetches their assigned teacher's available slots for booking."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        teacher = request.user.assigned_teacher
+        if not teacher:
+            return Response({'slots': [], 'message': 'No teacher assigned yet.'})
+
+        today = dt_date.today()
+        slots = TeacherAvailability.objects.filter(
+            teacher=teacher,
+            date__gte=today
+        )
+        serializer = TeacherAvailabilitySerializer(slots, many=True)
+        return Response({
+            'teacher_name': f"{teacher.first_name} {teacher.last_name}".strip() or teacher.username,
+            'slots': serializer.data,
+        })
+
+
+class CancelSessionView(APIView):
+    """Cancel a scheduled session with a reason. Notifies the mentor via email."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        reason = request.data.get('reason', '').strip()
+        if not reason:
+            return Response({'error': 'A cancellation reason is required.'}, status=400)
+
+        try:
+            # Allow teacher or student to cancel their own session
+            session = ClassSession.objects.get(pk=pk, status='Scheduled')
+            user = request.user
+
+            # Verify the user is the teacher or student of this session
+            if session.teacher != user and session.student != user:
+                return Response({'error': 'You are not authorized to cancel this session.'}, status=403)
+
+            session.status = 'Cancelled'
+            session.cancel_reason = reason
+            session.cancelled_by = user
+            session.save()
+
+            # Notify the student's mentor via email
+            student = session.student
+            if student and student.assigned_mentor:
+                mentor = student.assigned_mentor
+                canceller_name = f"{user.first_name} {user.last_name}".strip() or user.username
+                canceller_role = 'Teacher' if user == session.teacher else 'Student'
+                try:
+                    send_mail(
+                        subject=f'Class Cancelled: {session.title}',
+                        message=(
+                            f"Hello {mentor.first_name or 'Mentor'},\n\n"
+                            f"A class has been cancelled:\n\n"
+                            f"Class: {session.title}\n"
+                            f"Course: {session.course.name}\n"
+                            f"Scheduled Time: {session.scheduled_time}\n"
+                            f"Cancelled By: {canceller_name} ({canceller_role})\n"
+                            f"Reason: {reason}\n\n"
+                            f"Please follow up if needed.\n\n"
+                            f"— Produit Academy"
+                        ),
+                        from_email='noreply@produitacademy.com',
+                        recipient_list=[mentor.email],
+                        fail_silently=True,
+                    )
+                except Exception as e:
+                    print(f"Failed to send cancellation email: {e}")
+
+            return Response({'message': 'Session cancelled successfully.'})
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'Scheduled session not found.'}, status=404)
 
 # ============================================================
 # PROFILE & PASSWORD MANAGEMENT

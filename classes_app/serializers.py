@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from api.models import User
-from .models import Course, Enrollment, ClassSession, AttendanceRecord
+from .models import Course, Enrollment, ClassSession, AttendanceRecord, TeacherAvailability
 
 
 class CourseSerializer(serializers.ModelSerializer):
@@ -46,6 +46,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     teacher_name = serializers.CharField(source='teacher.username', read_only=True)
     attendance_submitted = serializers.SerializerMethodField()
+    cancelled_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = ClassSession
@@ -53,12 +54,18 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             'id', 'course', 'course_name', 'teacher', 'teacher_name',
             'title', 'meeting_link', 'scheduled_time', 'duration_minutes',
             'status', 'attendance_submitted', 'created_at',
-            'is_demo', 'student', 'teacher_notes'
+            'is_demo', 'student', 'teacher_notes',
+            'cancel_reason', 'cancelled_by', 'cancelled_by_name'
         ]
         read_only_fields = ['teacher', 'created_at']
 
     def get_attendance_submitted(self, obj):
         return obj.attendance.exists()
+
+    def get_cancelled_by_name(self, obj):
+        if obj.cancelled_by:
+            return f"{obj.cancelled_by.first_name} {obj.cancelled_by.last_name}".strip() or obj.cancelled_by.username
+        return None
 
 
 class AttendanceRecordSerializer(serializers.ModelSerializer):
@@ -196,4 +203,11 @@ class UserUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['first_name', 'last_name', 'email', 'phone_number', 'address', 'current_class', 'school_name', 'is_active']
+
+
+class TeacherAvailabilitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TeacherAvailability
+        fields = ['id', 'teacher', 'date', 'start_time', 'end_time', 'created_at']
+        read_only_fields = ['teacher', 'created_at']
 

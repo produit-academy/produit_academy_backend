@@ -24,6 +24,7 @@ from .views import (
     ScheduleDemoView, TeacherDemoLinkView, AcceptDemoView, RejectDemoView,
     BookSessionView, CompleteSessionView,
     ClassesProfileView, ClassesChangePasswordView,
+    TeacherAvailabilityView, StudentTeacherSlotsView, CancelSessionView,
 )
 
 urlpatterns = [
@@ -54,6 +55,11 @@ urlpatterns = [
     path('student/demo/<int:pk>/reject/', RejectDemoView.as_view(), name='student-reject-demo'),
     path('student/book-session/', BookSessionView.as_view(), name='student-book-session'),
     path('teacher/session/<int:pk>/complete/', CompleteSessionView.as_view(), name='teacher-complete-session'),
+
+    # Teacher Availability & Cancellation
+    path('teacher/availability/', TeacherAvailabilityView.as_view(), name='teacher-availability'),
+    path('student/teacher-slots/', StudentTeacherSlotsView.as_view(), name='student-teacher-slots'),
+    path('session/<int:pk>/cancel/', CancelSessionView.as_view(), name='session-cancel'),
 
     # Admin
     path('admin/staff/', AdminStaffManagementView.as_view(), name='admin-staff-management'),

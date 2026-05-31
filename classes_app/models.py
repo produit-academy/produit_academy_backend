@@ -21,20 +21,19 @@ class TeacherProfile(models.Model):
 
 
 class TeacherAvailability(models.Model):
-    DAY_CHOICES = [
-        ('Monday', 'Monday'), ('Tuesday', 'Tuesday'), ('Wednesday', 'Wednesday'),
-        ('Thursday', 'Thursday'), ('Friday', 'Friday'), ('Saturday', 'Saturday'), ('Sunday', 'Sunday')
-    ]
-    teacher = models.ForeignKey(TeacherProfile, on_delete=models.CASCADE, related_name='availabilities')
-    day_of_week = models.CharField(max_length=15, choices=DAY_CHOICES)
+    """Weekly availability: teacher submits specific dates + time slots each week (by Sunday 6 PM)."""
+    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='teacher_availabilities', limit_choices_to={'role': 'teacher'})
+    date = models.DateField()  # specific date, e.g. 2026-06-02 (Monday)
     start_time = models.TimeField()
     end_time = models.TimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['day_of_week', 'start_time']
+        ordering = ['date', 'start_time']
+        unique_together = ('teacher', 'date', 'start_time')  # prevent duplicate slots
 
     def __str__(self):
-        return f"{self.teacher.user.username} - {self.day_of_week} ({self.start_time} to {self.end_time})"
+        return f"{self.teacher.username} - {self.date} ({self.start_time} to {self.end_time})"
 
 
 class Enrollment(models.Model):
@@ -68,6 +67,8 @@ class ClassSession(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Scheduled')
     is_demo = models.BooleanField(default=False)
     teacher_notes = models.TextField(blank=True, null=True)
+    cancel_reason = models.TextField(blank=True, null=True)
+    cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_sessions')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

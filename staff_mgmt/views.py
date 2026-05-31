@@ -56,8 +56,8 @@ class SuperAdminUserListView(generics.ListAPIView):
     serializer_class = SuperAdminUserSerializer
 
     def get_queryset(self):
-        if not is_admin(self.request.user):
-            raise PermissionDenied('Only admins can access this.')
+        if not self.request.user.is_superuser:
+            raise PermissionDenied('Only super admins can access this.')
         queryset = User.objects.exclude(role='student').order_by('-date_joined')
         platform = self.request.query_params.get('platform')
         if platform:
@@ -75,8 +75,8 @@ class SuperAdminUserCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if not is_admin(request.user):
-            return Response({'error': 'Only admins can create users.'}, status=403)
+        if not request.user.is_superuser:
+            return Response({'error': 'Only super admins can create users.'}, status=403)
 
         email = request.data.get('email')
         password = request.data.get('password')
@@ -177,8 +177,8 @@ class SuperAdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = SuperAdminUserSerializer
 
     def get_object(self):
-        if not is_admin(self.request.user):
-            raise PermissionDenied('Only admins can access this.')
+        if not self.request.user.is_superuser:
+            raise PermissionDenied('Only super admins can access this.')
         try:
             return User.objects.get(pk=self.kwargs['pk'])
         except User.DoesNotExist:

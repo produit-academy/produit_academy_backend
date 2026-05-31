@@ -14,6 +14,7 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
             token['role'] = 'admin'
         else:
             token['role'] = user.role
+        token['is_superuser'] = user.is_superuser
         token['profile_complete'] = bool(user.college and user.phone_number)
         token['platform'] = user.platform
         return token

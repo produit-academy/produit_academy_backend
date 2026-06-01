@@ -170,6 +170,7 @@ class StudentDashboardView(APIView):
             'courses': CourseSerializer(courses, many=True).data,
             'assigned_mentor': mentor_info,
             'assigned_teachers': teachers_info,
+        }
         return Response(data)
 
 # --- Teacher Dashboard ---

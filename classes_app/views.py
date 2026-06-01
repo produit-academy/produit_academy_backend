@@ -51,6 +51,14 @@ class IsClassesPlatform(permissions.BasePermission):
         return request.user.platform == 'classes'
 
 
+def _is_staff_approved(user):
+    """Check if a teacher/mentor is HR-approved."""
+    if user.role == 'teacher':
+        return getattr(getattr(user, 'classes_teacher_profile', None), 'is_approved', False)
+    elif user.role == 'mentor':
+        return getattr(getattr(user, 'classes_mentor_profile', None), 'is_approved', False)
+    return False
+
 # --- Profile Endpoint ---
 
 class ClassesMeView(APIView):
@@ -59,7 +67,7 @@ class ClassesMeView(APIView):
     def get(self, request):
         user = request.user
         mentor_info = None
-        if user.assigned_mentor:
+        if user.assigned_mentor and _is_staff_approved(user.assigned_mentor):
             m = user.assigned_mentor
             mentor_info = {'id': m.id, 'name': f"{m.first_name} {m.last_name}", 'email': m.email}
 
@@ -69,13 +77,14 @@ class ClassesMeView(APIView):
             enrollments = Enrollment.objects.filter(student=user, teacher__isnull=False).select_related('teacher', 'course')
             for e in enrollments:
                 t = e.teacher
-                teachers_info.append({
-                    'id': t.id,
-                    'name': f"{t.first_name} {t.last_name}".strip(),
-                    'email': t.email,
-                    'course_id': e.course.id,
-                    'course_name': e.course.name,
-                })
+                if _is_staff_approved(t):
+                    teachers_info.append({
+                        'id': t.id,
+                        'name': f"{t.first_name} {t.last_name}".strip(),
+                        'email': t.email,
+                        'course_id': e.course.id,
+                        'course_name': e.course.name,
+                    })
 
         return Response({
             'id': user.id,
@@ -108,18 +117,16 @@ class StudentDashboardView(APIView):
 
         courses = Course.objects.filter(id__in=enrolled_course_ids, is_active=True)
 
-        # Upcoming classes: enrolled courses OR demos assigned directly to this student
+        # Upcoming classes: only sessions explicitly assigned to this student
         upcoming = ClassSession.objects.filter(
-            Q(course_id__in=enrolled_course_ids) | Q(student=user),
+            student=user,
             scheduled_time__gte=now,
             status='Scheduled'
         ).distinct().order_by('scheduled_time')[:10]
 
-        # Completed demos awaiting student acceptance (not yet enrolled)
+        # Completed demos awaiting student acceptance
         completed_demos = ClassSession.objects.filter(
-            student=user, is_demo=True, status='Completed'
-        ).exclude(
-            course_id__in=enrolled_course_ids
+            student=user, is_demo=True, status='Completed', demo_outcome='Pending'
         ).order_by('-scheduled_time')[:5]
 
         # Attendance stats
@@ -132,7 +139,7 @@ class StudentDashboardView(APIView):
 
         # Assigned staff info
         mentor_info = None
-        if user.assigned_mentor:
+        if user.assigned_mentor and _is_staff_approved(user.assigned_mentor):
             m = user.assigned_mentor
             mentor_info = {'id': m.id, 'name': f"{m.first_name} {m.last_name}", 'email': m.email}
 
@@ -143,13 +150,14 @@ class StudentDashboardView(APIView):
         ).select_related('teacher', 'course')
         for e in enrollments_with_teachers:
             t = e.teacher
-            teachers_info.append({
-                'id': t.id,
-                'name': f"{t.first_name} {t.last_name}".strip(),
-                'email': t.email,
-                'course_id': e.course.id,
-                'course_name': e.course.name,
-            })
+            if _is_staff_approved(t):
+                teachers_info.append({
+                    'id': t.id,
+                    'name': f"{t.first_name} {t.last_name}".strip(),
+                    'email': t.email,
+                    'course_id': e.course.id,
+                    'course_name': e.course.name,
+                })
 
         data = {
             'upcoming_classes': ClassSessionSerializer(upcoming, many=True).data,
@@ -162,9 +170,7 @@ class StudentDashboardView(APIView):
             'courses': CourseSerializer(courses, many=True).data,
             'assigned_mentor': mentor_info,
             'assigned_teachers': teachers_info,
-        }
         return Response(data)
-
 
 # --- Teacher Dashboard ---
 
@@ -209,6 +215,24 @@ class TeacherDashboardView(APIView):
             teacher=user, status='Completed'
         ).count()
 
+        total_minutes = ClassSession.objects.filter(
+            teacher=user, status='Completed'
+        ).aggregate(total=Sum('duration_minutes'))['total'] or 0
+        total_hours = round(total_minutes / 60, 1)
+
+        hourly_rate = 0
+        try:
+            hourly_rate = float(user.classes_teacher_profile.hourly_rate)
+        except:
+            pass
+        total_earnings = round(total_hours * hourly_rate, 2)
+
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_minutes = ClassSession.objects.filter(
+            teacher=user, status='Completed', scheduled_time__gte=month_start
+        ).aggregate(total=Sum('duration_minutes'))['total'] or 0
+        this_month_earnings = round((month_minutes / 60) * hourly_rate, 2)
+
         # Student info for the list, including which courses they share with this teacher
         students_data = []
         for student in assigned_students:
@@ -216,23 +240,30 @@ class TeacherDashboardView(APIView):
             total_records = records.count()
             attended = records.filter(status__in=['Present', 'Late']).count()
             pct = round(attended / total_records * 100, 1) if total_records > 0 else 100.0
-            # Courses this teacher teaches this student
-            student_courses = Enrollment.objects.filter(
+            # Courses this teacher teaches this student (names + IDs)
+            student_enrollments = Enrollment.objects.filter(
                 student=student, teacher=user
-            ).select_related('course').values_list('course__name', flat=True)
+            ).select_related('course')
+            student_courses = [e.course.name for e in student_enrollments]
+            student_course_ids = [e.course.id for e in student_enrollments]
             students_data.append({
                 'id': student.id,
                 'first_name': student.first_name,
                 'last_name': student.last_name,
                 'email': student.email,
                 'attendance_percentage': pct,
-                'courses': list(student_courses),
+                'courses': student_courses,
+                'course_ids': student_course_ids,
             })
 
         data = {
             'upcoming_classes': ClassSessionSerializer(upcoming, many=True).data,
             'pending_attendance': ClassSessionSerializer(pending, many=True).data,
             'total_classes_held': total_held,
+            'total_hours_worked': total_hours,
+            'hourly_rate': hourly_rate,
+            'total_earnings': total_earnings,
+            'this_month_earnings': this_month_earnings,
             'total_students': assigned_students.count(),
             'courses': CourseSerializer(courses, many=True).data,
             'assigned_students': students_data,
@@ -242,12 +273,79 @@ class TeacherDashboardView(APIView):
 
 # --- Session Create ---
 
-class SessionCreateView(generics.CreateAPIView):
+class SessionCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
-    serializer_class = ClassSessionSerializer
 
-    def perform_create(self, serializer):
-        serializer.save(teacher=self.request.user)
+    def post(self, request):
+        teacher = request.user
+        if not _is_staff_approved(teacher):
+            return Response({'error': 'Your profile is pending HR approval.'}, status=status.HTTP_403_FORBIDDEN)
+            
+        student_id = request.data.get('student_id') or request.data.get('student')
+        course_id = request.data.get('course')
+        scheduled_time = request.data.get('scheduled_time')
+        duration_minutes = int(request.data.get('duration_minutes', 60))
+        meeting_link = request.data.get('meeting_link', '')
+        session_title = request.data.get('session_title', '')
+
+        if not student_id or not course_id or not scheduled_time:
+            return Response({'error': 'Student, course, and scheduled time are required.'}, status=400)
+
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({'error': 'Course not found.'}, status=404)
+            
+        try:
+            student = User.objects.get(id=student_id, role='student')
+        except User.DoesNotExist:
+            return Response({'error': 'Student not found.'}, status=404)
+
+        is_assigned = Enrollment.objects.filter(
+            student=student, course=course, teacher=teacher
+        ).exists()
+        
+        if not is_assigned:
+            return Response({'error': 'You are not assigned to teach this course to this student.'}, status=403)
+
+        if not session_title:
+            session_title = f"1-to-1 Class: {course.name}"
+
+        try:
+            from dateutil.parser import parse
+            st_dt = parse(scheduled_time)
+            end_dt = st_dt + timedelta(minutes=duration_minutes)
+            
+            teacher_overlap = ClassSession.objects.filter(
+                teacher=teacher, status='Scheduled',
+                scheduled_time__lt=end_dt,
+                scheduled_time__gte=st_dt - timedelta(hours=4)
+            )
+            for sess in teacher_overlap:
+                s_end = sess.scheduled_time + timedelta(minutes=sess.duration_minutes)
+                if max(st_dt, sess.scheduled_time) < min(end_dt, s_end):
+                    return Response({'error': 'You already have a session scheduled during this time.'}, status=400)
+                    
+            student_overlap = ClassSession.objects.filter(
+                student=student, status='Scheduled',
+                scheduled_time__lt=end_dt,
+                scheduled_time__gte=st_dt - timedelta(hours=4)
+            )
+            for sess in student_overlap:
+                s_end = sess.scheduled_time + timedelta(minutes=sess.duration_minutes)
+                if max(st_dt, sess.scheduled_time) < min(end_dt, s_end):
+                    return Response({'error': 'The student already has a session scheduled during this time.'}, status=400)
+        except Exception:
+            pass
+
+        session = ClassSession.objects.create(
+            teacher=teacher, student=student, course=course,
+            session_title=session_title, scheduled_time=scheduled_time,
+            duration_minutes=duration_minutes, meeting_link=meeting_link,
+            status='Scheduled'
+        )
+        
+        return Response(ClassSessionSerializer(session).data, status=201)
 
 
 # --- Session Roster ---
@@ -261,9 +359,10 @@ class SessionRosterView(APIView):
         except ClassSession.DoesNotExist:
             return Response({'detail': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        students = User.objects.filter(
-            classes_enrollments__course=session.course
-        ).order_by('username')
+        if session.student:
+            students = User.objects.filter(pk=session.student_id)
+        else:
+            students = User.objects.none()
 
         serializer = RosterStudentSerializer(
             students, many=True, context={'session_id': pk}
@@ -323,7 +422,7 @@ class MentorDashboardView(APIView):
             assigned_mentor=user, platform='classes', role='student'
         )
 
-        # All students data with attendance
+        # All students data with attendance + enrolled courses
         all_students = []
         at_risk = []
         for student in assigned_students:
@@ -331,6 +430,15 @@ class MentorDashboardView(APIView):
             total = records.count()
             attended = records.filter(status__in=['Present', 'Late']).count()
             pct = round(attended / total * 100, 1) if total > 0 else 100.0
+
+            # Enrolled courses for this student
+            student_enrollments = Enrollment.objects.filter(
+                student=student
+            ).select_related('course')
+            enrolled_courses = [
+                {'id': e.course.id, 'name': e.course.name}
+                for e in student_enrollments if e.course.is_active
+            ]
 
             student_info = {
                 'id': student.id,
@@ -341,6 +449,7 @@ class MentorDashboardView(APIView):
                 'attendance_percentage': pct,
                 'total_classes': total,
                 'attended': attended,
+                'enrolled_courses': enrolled_courses,
             }
             all_students.append(student_info)
             if pct < 75 and total > 0:
@@ -374,11 +483,61 @@ class MentorDashboardView(APIView):
                 'student_name': f"{s.student.first_name} {s.student.last_name}".strip() if s.student else '',
             })
 
+        # Rejected demos that need follow-up (student has no teacher for this course yet)
+        action_required_demos = ClassSession.objects.filter(
+            student_id__in=student_ids,
+            is_demo=True,
+            demo_outcome='Rejected'
+        ).select_related('course', 'teacher', 'student')
+        
+        action_required_data = []
+        for s in action_required_demos:
+            # check if student already has a teacher for this course
+            has_teacher = Enrollment.objects.filter(student=s.student, course=s.course, teacher__isnull=False).exists()
+            if not has_teacher:
+                action_required_data.append({
+                    'id': s.id,
+                    'course_id': s.course.id,
+                    'course_name': s.course.name,
+                    'student_id': s.student.id,
+                    'student_name': f"{s.student.first_name} {s.student.last_name}".strip(),
+                    'rejected_teacher_id': s.teacher.id,
+                    'rejected_teacher_name': f"{s.teacher.first_name} {s.teacher.last_name}".strip(),
+                })
+
+        # Mentor payment/earnings stats
+        now = timezone.now()
+        # Total hours: sum duration of all completed sessions for this mentor's students
+        mentor_sessions = ClassSession.objects.filter(
+            student_id__in=student_ids,
+            status='Completed'
+        )
+        total_mentor_minutes = mentor_sessions.aggregate(total=Sum('duration_minutes'))['total'] or 0
+        total_mentor_hours = round(total_mentor_minutes / 60, 1)
+
+        hourly_rate = 0
+        try:
+            hourly_rate = float(user.classes_mentor_profile.hourly_rate)
+        except Exception:
+            pass
+        total_earnings = round(total_mentor_hours * hourly_rate, 2)
+
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_minutes = mentor_sessions.filter(
+            scheduled_time__gte=month_start
+        ).aggregate(total=Sum('duration_minutes'))['total'] or 0
+        this_month_earnings = round((month_minutes / 60) * hourly_rate, 2)
+
         data = {
             'total_students': assigned_students.count(),
             'at_risk_students': at_risk,
             'all_students': all_students,
             'cancelled_sessions': cancelled_data,
+            'action_required_demos': action_required_data,
+            'total_hours_worked': total_mentor_hours,
+            'hourly_rate': hourly_rate,
+            'total_earnings': total_earnings,
+            'this_month_earnings': this_month_earnings,
         }
         return Response(data)
 
@@ -471,11 +630,15 @@ class AdminBulkEnrollView(APIView):
         if mentor_id:
             try:
                 mentor = User.objects.get(pk=mentor_id, role='mentor')
+                if not _is_staff_approved(mentor):
+                    return Response({'detail': 'Selected mentor is not approved.'}, status=400)
             except User.DoesNotExist:
                 pass
         if teacher_id:
             try:
                 teacher = User.objects.get(pk=teacher_id, role='teacher')
+                if not _is_staff_approved(teacher):
+                    return Response({'detail': 'Selected teacher is not approved.'}, status=400)
             except User.DoesNotExist:
                 pass
 
@@ -701,7 +864,37 @@ class AdminStaffManagementView(generics.ListCreateAPIView):
         return BasicUserSerializer
 
     def get_queryset(self):
-        return User.objects.filter(platform='classes', role__in=['teacher', 'mentor']).order_by('-date_joined')
+        qs = User.objects.filter(platform='classes', role__in=['teacher', 'mentor']).order_by('-date_joined')
+        if self.request.query_params.get('approved_only') == 'true':
+            # Teachers with approved profiles OR Mentors with approved profiles
+            qs = qs.filter(
+                Q(classes_teacher_profile__is_approved=True) | 
+                Q(classes_mentor_profile__is_approved=True)
+            ).distinct()
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        """Override list to include subjects with names for teacher filtering."""
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        data = serializer.data
+
+        # Prefetch teacher subjects with names
+        from .models import TeacherProfile
+        teacher_subjects = {}
+        for tp in TeacherProfile.objects.filter(
+            user__in=queryset
+        ).prefetch_related('subjects').select_related('user'):
+            teacher_subjects[tp.user_id] = list(tp.subjects.values('id', 'name'))
+
+        for item in data:
+            uid = item['id']
+            if uid in teacher_subjects:
+                item['subjects_detail'] = teacher_subjects[uid]
+            else:
+                item['subjects_detail'] = []
+
+        return Response(data)
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -730,6 +923,8 @@ class AdminAssignStaffView(APIView):
         if mentor_id:
             try:
                 mentor = User.objects.get(pk=mentor_id, role='mentor')
+                if not _is_staff_approved(mentor):
+                    return Response({'detail': 'Mentor is not approved.'}, status=status.HTTP_400_BAD_REQUEST)
                 student.assigned_mentor = mentor
             except User.DoesNotExist:
                 return Response({'detail': 'Mentor not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -742,6 +937,8 @@ class AdminAssignStaffView(APIView):
         if teacher_id and course_id:
             try:
                 teacher = User.objects.get(pk=teacher_id, role='teacher')
+                if not _is_staff_approved(teacher):
+                    return Response({'detail': 'Teacher is not approved.'}, status=status.HTTP_400_BAD_REQUEST)
             except User.DoesNotExist:
                 return Response({'detail': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
             enrollment = Enrollment.objects.filter(student=student, course_id=course_id).first()
@@ -861,10 +1058,42 @@ class AdminUserAnalyticsView(APIView):
             present_records = all_attendance.filter(status='Present').count()
             avg_attendance_rate = round((present_records / total_records * 100) if total_records > 0 else 0, 1)
 
+            try:
+                hourly_rate = float(user.classes_teacher_profile.hourly_rate)
+            except:
+                hourly_rate = 0
+                
+            total_earnings = round((total_minutes / 60) * hourly_rate, 2)
+            
+            from django.utils import timezone
+            month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            month_sessions = sessions.filter(scheduled_time__gte=month_start)
+            month_minutes = month_sessions.aggregate(total=Sum('duration_minutes'))['total'] or 0
+            this_month_earnings = round((month_minutes / 60) * hourly_rate, 2)
+
+            student_breakdown = []
+            for enrollment in Enrollment.objects.filter(teacher=user).select_related('student', 'course'):
+                student_sessions = sessions.filter(
+                    student=enrollment.student, course=enrollment.course
+                )
+                mins = student_sessions.aggregate(total=Sum('duration_minutes'))['total'] or 0
+                hours = round(mins / 60, 1)
+                earned = round(hours * hourly_rate, 2)
+                student_breakdown.append({
+                    'student_name': f"{enrollment.student.first_name} {enrollment.student.last_name}".strip(),
+                    'course_name': enrollment.course.name,
+                    'hours': hours,
+                    'earned': earned,
+                })
+
             data['analytics'] = {
                 'classes_taught': classes_taught,
                 'total_teaching_hours': round(total_minutes / 60, 1),
                 'avg_student_attendance_rate': avg_attendance_rate,
+                'hourly_rate': hourly_rate,
+                'total_earnings': total_earnings,
+                'this_month_earnings': this_month_earnings,
+                'student_breakdown': student_breakdown,
             }
 
         elif user.role == 'mentor':
@@ -911,6 +1140,8 @@ class ScheduleDemoView(APIView):
             student = User.objects.get(pk=student_id, role='student')
             teacher = User.objects.get(pk=teacher_id, role='teacher')
             course = Course.objects.get(pk=course_id)
+            if not _is_staff_approved(teacher):
+                return Response({'error': 'Teacher is not approved.'}, status=400)
         except (User.DoesNotExist, Course.DoesNotExist):
             return Response({'error': 'Invalid student, teacher, or course.'}, status=404)
 
@@ -980,6 +1211,9 @@ class AcceptDemoView(APIView):
                 enrollment.teacher = demo.teacher
                 enrollment.save()
                 
+            demo.demo_outcome = 'Approved'
+            demo.save()
+                
             return Response({'message': 'Demo accepted and enrolled successfully.'})
         except ClassSession.DoesNotExist:
             return Response({'error': 'Demo not found'}, status=404)
@@ -993,10 +1227,10 @@ class RejectDemoView(APIView):
             demo = ClassSession.objects.get(pk=pk, student=request.user, is_demo=True)
             if demo.status != 'Completed':
                 return Response({'error': 'Demo is not completed yet.'}, status=400)
-            demo.status = 'Cancelled'
+            demo.demo_outcome = 'Rejected'
             demo.save()
             
-            return Response({'message': 'Demo rejected. HR will assign a new teacher soon.'})
+            return Response({'message': 'Demo rejected. Your mentor will assign a new teacher soon.'})
         except ClassSession.DoesNotExist:
             return Response({'error': 'Demo not found'}, status=404)
 
@@ -1014,6 +1248,8 @@ class BookSessionView(APIView):
             teacher = enrollment.teacher
             if not teacher:
                 return Response({'error': 'No teacher assigned for this course.'}, status=400)
+            if not _is_staff_approved(teacher):
+                return Response({'error': 'Teacher is not approved.'}, status=400)
 
             # Parse the requested time
             from django.utils.dateparse import parse_datetime
@@ -1346,11 +1582,11 @@ class ClassesProfileView(APIView):
                         'id': e.teacher.id,
                         'name': f"{e.teacher.first_name} {e.teacher.last_name}".strip(),
                         'email': e.teacher.email
-                    } if e.teacher else None
+                    } if (e.teacher and _is_staff_approved(e.teacher)) else None
                 }
                 for e in enrollments
             ]
-            if user.assigned_mentor:
+            if user.assigned_mentor and _is_staff_approved(user.assigned_mentor):
                 m = user.assigned_mentor
                 data['mentor'] = {'id': m.id, 'name': f"{m.first_name} {m.last_name}".strip(), 'email': m.email}
 

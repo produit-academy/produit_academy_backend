@@ -15,9 +15,25 @@ class Course(models.Model):
 class TeacherProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='classes_teacher_profile', limit_choices_to={'role': 'teacher'})
     subjects = models.ManyToManyField(Course, related_name='teachers')
+    is_approved = models.BooleanField(default=False)
+    hourly_rate = models.DecimalField(
+        max_digits=8, decimal_places=2, default=0,
+        help_text="Payment rate per hour (₹)"
+    )
 
     def __str__(self):
         return f"Profile: {self.user.username}"
+
+class MentorProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='classes_mentor_profile', limit_choices_to={'role': 'mentor'})
+    is_approved = models.BooleanField(default=False)
+    hourly_rate = models.DecimalField(
+        max_digits=8, decimal_places=2, default=0,
+        help_text="Payment rate per hour (₹)"
+    )
+
+    def __str__(self):
+        return f"Mentor Profile: {self.user.username}"
 
 
 class TeacherAvailability(models.Model):
@@ -65,7 +81,14 @@ class ClassSession(models.Model):
     scheduled_time = models.DateTimeField()
     duration_minutes = models.IntegerField(default=60)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Scheduled')
+    OUTCOME_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Approved', 'Approved'),
+        ('Rejected', 'Rejected')
+    ]
+
     is_demo = models.BooleanField(default=False)
+    demo_outcome = models.CharField(max_length=20, choices=OUTCOME_CHOICES, default='Pending')
     teacher_notes = models.TextField(blank=True, null=True)
     cancel_reason = models.TextField(blank=True, null=True)
     cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_sessions')

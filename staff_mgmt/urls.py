@@ -9,11 +9,12 @@ from .views import (
     StaffJobApplicationListView, StaffJobApplicationUpdateView,
     AdminStaffListView, AdminStaffDetailView,
     AdminTaskCreateView, AdminTaskListView, AdminTaskDetailView,
-    OnboardStaffView, OnboardStaffDetailView, ApproveStaffView,
+    OnboardStaffView, OnboardStaffDetailView, ApproveStaffView, RevokeStaffView,
     StaffWalletView,
     ManagerStaffListView, ManagerTaskCreateView, ManagerTaskListView,
     ManagerTaskDetailView, ManagerCommentView, MarkTaskPaidView,
     ManagerWalletListView, ManagerWalletDetailView, ManagerTransactionCreateView,
+    ManagerDirectPayView,
 )
 
 urlpatterns = [
@@ -59,6 +60,7 @@ urlpatterns = [
     path('admin/onboard-staff/', OnboardStaffView.as_view(), name='onboard-classes-staff'),
     path('admin/onboard-staff/<int:pk>/', OnboardStaffDetailView.as_view(), name='onboard-staff-detail'),
     path('admin/approve-staff/', ApproveStaffView.as_view(), name='approve-classes-staff'),
+    path('admin/revoke-staff/', RevokeStaffView.as_view(), name='revoke-classes-staff'),
 
     # Manager Routes
     path('staff/manager/staff/', ManagerStaffListView.as_view(), name='manager-staff-list'),
@@ -70,4 +72,5 @@ urlpatterns = [
     path('staff/manager/wallets/', ManagerWalletListView.as_view(), name='manager-wallet-list'),
     path('staff/manager/wallets/<int:pk>/', ManagerWalletDetailView.as_view(), name='manager-wallet-detail'),
     path('staff/manager/wallets/<int:pk>/transactions/', ManagerTransactionCreateView.as_view(), name='manager-transaction-create'),
+    path('staff/manager/direct-pay/', ManagerDirectPayView.as_view(), name='manager-direct-pay'),
 ]

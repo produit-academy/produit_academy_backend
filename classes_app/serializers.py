@@ -45,6 +45,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 class ClassSessionSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     teacher_name = serializers.CharField(source='teacher.username', read_only=True)
+    student_name = serializers.SerializerMethodField()
     attendance_submitted = serializers.SerializerMethodField()
     cancelled_by_name = serializers.SerializerMethodField()
 
@@ -54,13 +55,18 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             'id', 'course', 'course_name', 'teacher', 'teacher_name',
             'title', 'meeting_link', 'scheduled_time', 'duration_minutes',
             'status', 'attendance_submitted', 'created_at',
-            'is_demo', 'student', 'teacher_notes',
+            'is_demo', 'student', 'student_name', 'teacher_notes',
             'cancel_reason', 'cancelled_by', 'cancelled_by_name'
         ]
         read_only_fields = ['teacher', 'created_at']
 
     def get_attendance_submitted(self, obj):
         return obj.attendance.exists()
+
+    def get_student_name(self, obj):
+        if obj.student:
+            return f"{obj.student.first_name} {obj.student.last_name}".strip() or obj.student.username
+        return None
 
     def get_cancelled_by_name(self, obj):
         if obj.cancelled_by:
@@ -144,10 +150,11 @@ class BasicUserSerializer(serializers.ModelSerializer):
     mentor_name = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
     subjects = serializers.SerializerMethodField()
+    is_approved = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'role', 'assigned_mentor', 'mentor_name', 'teacher_name', 'subjects']
+        fields = ['id', 'first_name', 'last_name', 'email', 'role', 'assigned_mentor', 'mentor_name', 'teacher_name', 'subjects', 'is_approved']
 
     def get_mentor_name(self, obj):
         m = obj.assigned_mentor
@@ -169,6 +176,13 @@ class BasicUserSerializer(serializers.ModelSerializer):
         if obj.role == 'teacher' and hasattr(obj, 'classes_teacher_profile'):
             return list(obj.classes_teacher_profile.subjects.values_list('id', flat=True))
         return []
+
+    def get_is_approved(self, obj):
+        if obj.role == 'teacher':
+            return getattr(getattr(obj, 'classes_teacher_profile', None), 'is_approved', False)
+        elif obj.role == 'mentor':
+            return getattr(getattr(obj, 'classes_mentor_profile', None), 'is_approved', False)
+        return False
 
 class StaffCreateSerializer(serializers.ModelSerializer):
     class Meta:

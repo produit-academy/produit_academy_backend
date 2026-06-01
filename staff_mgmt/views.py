@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskComment, Complaint, ContactInquiry, StaffWallet, WalletTransaction
-from classes_app.models import Course, TeacherProfile
+from classes_app.models import Course, TeacherProfile, MentorProfile
 from api.views import send_html_email
 import random
 import string
@@ -58,7 +58,13 @@ class SuperAdminUserListView(generics.ListAPIView):
     def get_queryset(self):
         if not self.request.user.is_superuser:
             raise PermissionDenied('Only super admins can access this.')
+            
         queryset = User.objects.exclude(role='student').order_by('-date_joined')
+        
+        # Exclude unapproved teachers and mentors
+        queryset = queryset.exclude(role='teacher', classes_teacher_profile__is_approved=False)
+        queryset = queryset.exclude(role='mentor', classes_mentor_profile__is_approved=False)
+        
         platform = self.request.query_params.get('platform')
         if platform:
             if platform == 'staff':
@@ -284,6 +290,20 @@ class OnboardStaffView(APIView):
             platform='classes', role__in=['teacher', 'mentor']
         ).order_by('-date_joined')
 
+        def _get_staff_approved(u):
+            if u.role == 'teacher':
+                return getattr(getattr(u, 'classes_teacher_profile', None), 'is_approved', False)
+            elif u.role == 'mentor':
+                return getattr(getattr(u, 'classes_mentor_profile', None), 'is_approved', False)
+            return False
+
+        def _get_staff_hourly_rate(u):
+            if u.role == 'teacher':
+                return getattr(getattr(u, 'classes_teacher_profile', None), 'hourly_rate', 0)
+            elif u.role == 'mentor':
+                return getattr(getattr(u, 'classes_mentor_profile', None), 'hourly_rate', 0)
+            return 0
+
         # Prefetch teacher profiles with subjects to avoid N+1
         teacher_profiles = {}
         for tp in TeacherProfile.objects.filter(
@@ -302,6 +322,8 @@ class OnboardStaffView(APIView):
             'is_active': u.is_active,
             'date_joined': u.date_joined.isoformat(),
             'has_signed': u.otp is None,  # OTP cleared = agreement signed
+            'is_approved': _get_staff_approved(u),
+            'hourly_rate': _get_staff_hourly_rate(u),
             'subjects': teacher_profiles.get(u.id, []),
         } for u in staff]
 
@@ -317,6 +339,7 @@ class OnboardStaffView(APIView):
         first_name = request.data.get('first_name', '')
         last_name = request.data.get('last_name', '')
         phone_number = request.data.get('phone_number', '')
+        hourly_rate = request.data.get('hourly_rate', 0)
 
         if not email or role not in ['teacher', 'mentor']:
             return Response({'error': 'Valid email and role (teacher/mentor) required.'}, status=400)
@@ -337,10 +360,13 @@ class OnboardStaffView(APIView):
         )
         
         if role == 'teacher':
-            profile = TeacherProfile.objects.create(user=user)
+            profile = TeacherProfile.objects.create(user=user, hourly_rate=hourly_rate)
             if subjects:
                 profile.subjects.set(Course.objects.filter(id__in=subjects))
+        elif role == 'mentor':
+            MentorProfile.objects.create(user=user, hourly_rate=hourly_rate)
                 
+        email_error = None
         try:
             send_html_email(
                 'Welcome to Produit Academy Classes',
@@ -350,10 +376,14 @@ class OnboardStaffView(APIView):
                 type='staff_otp',
                 from_email=HR_FROM_EMAIL,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            email_error = str(e)
             
-        return Response({'message': f'{role.capitalize()} onboarded successfully.', 'user_id': user.id}, status=201)
+        return Response({
+            'message': f'{role.capitalize()} onboarded successfully.',
+            'user_id': user.id,
+            'email_error': email_error
+        }, status=201)
 
 
 class OnboardStaffDetailView(APIView):
@@ -385,6 +415,16 @@ class OnboardStaffDetailView(APIView):
             profile, _ = TeacherProfile.objects.get_or_create(user=user)
             profile.subjects.set(Course.objects.filter(id__in=request.data['subjects']))
 
+        if 'hourly_rate' in request.data:
+            if user.role == 'teacher':
+                profile, _ = TeacherProfile.objects.get_or_create(user=user)
+                profile.hourly_rate = request.data['hourly_rate']
+                profile.save()
+            elif user.role == 'mentor':
+                profile, _ = MentorProfile.objects.get_or_create(user=user)
+                profile.hourly_rate = request.data['hourly_rate']
+                profile.save()
+
         return Response({'message': 'Staff details updated successfully.'})
 
     def delete(self, request, pk):
@@ -409,30 +449,67 @@ class ApproveStaffView(APIView):
         user_id = request.data.get('user_id')
         try:
             user = User.objects.get(id=user_id, role__in=['teacher', 'mentor'])
-            if user.is_verified:
-                return Response({'message': 'User already verified.'}, status=400)
+            is_newly_verified = False
+            if not user.is_verified:
+                # Generate random password
+                raw_password = 'PA-' + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                user.set_password(raw_password)
+                user.is_verified = True
+                user.save()
+                is_newly_verified = True
+            
+            if user.role == 'teacher':
+                profile, _ = TeacherProfile.objects.get_or_create(user=user)
+                if profile.is_approved:
+                    return Response({'error': 'Teacher already approved.'}, status=400)
+                profile.is_approved = True
+                profile.save()
+            elif user.role == 'mentor':
+                profile, _ = MentorProfile.objects.get_or_create(user=user)
+                if profile.is_approved:
+                    return Response({'error': 'Mentor already approved.'}, status=400)
+                profile.is_approved = True
+                profile.save()
+            
+            if is_newly_verified:
+                display_name = f"{user.first_name} {user.last_name}".strip() or user.email.split('@')[0]
+                try:
+                    send_html_email(
+                        'Your Produit Academy Account is Ready!',
+                        user.email,
+                        display_name,
+                        type='staff_credentials',
+                        from_email=HR_FROM_EMAIL,
+                        password=raw_password,
+                    )
+                except Exception:
+                    pass
+                return Response({'message': 'Staff approved. Login credentials sent via email.'})
+            
+            return Response({'message': 'Staff approval reinstated.'})
+        except User.DoesNotExist:
+            return Response({'error': 'User not found.'}, status=404)
 
-            # Generate random password
-            raw_password = 'PA-' + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-            user.set_password(raw_password)
-            user.is_verified = True
-            user.save()
+class RevokeStaffView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not (is_admin(request.user) or request.user.role == 'staff'):
+            return Response({'error': 'Only HR and admins can revoke staff approval.'}, status=403)
             
-            display_name = f"{user.first_name} {user.last_name}".strip() or user.email.split('@')[0]
+        user_id = request.data.get('user_id')
+        try:
+            user = User.objects.get(id=user_id, role__in=['teacher', 'mentor'])
+            if user.role == 'teacher':
+                profile, _ = TeacherProfile.objects.get_or_create(user=user)
+                profile.is_approved = False
+                profile.save()
+            elif user.role == 'mentor':
+                profile, _ = MentorProfile.objects.get_or_create(user=user)
+                profile.is_approved = False
+                profile.save()
             
-            try:
-                send_html_email(
-                    'Your Produit Academy Account is Ready!',
-                    user.email,
-                    display_name,
-                    type='staff_credentials',
-                    from_email=HR_FROM_EMAIL,
-                    password=raw_password,
-                )
-            except Exception:
-                pass
-                
-            return Response({'message': 'Staff approved. Login credentials sent via email.'})
+            return Response({'message': 'Staff approval revoked.'})
         except User.DoesNotExist:
             return Response({'error': 'User not found.'}, status=404)
 
@@ -657,7 +734,7 @@ class StaffJobApplicationListView(generics.ListAPIView):
         return JobApplicationSerializer
 
 
-class StaffJobApplicationUpdateView(generics.UpdateAPIView):
+class StaffJobApplicationUpdateView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_key = 'careers'
 
@@ -954,3 +1031,46 @@ class ManagerTransactionCreateView(generics.CreateAPIView):
         wallet.save()
         
         return Response({'message': 'Transaction added successfully.'})
+
+class ManagerDirectPayView(APIView):
+    """Manager makes a direct payment/adjustment to any staff/teacher/mentor."""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            raise PermissionDenied()
+            
+        staff_id = request.data.get('staff_id')
+        t_type = request.data.get('type')
+        amount_str = request.data.get('amount', 0)
+        note = request.data.get('note', '')
+        
+        try:
+            amount = Decimal(str(amount_str))
+        except:
+            return Response({'error': 'Invalid amount.'}, status=400)
+            
+        if t_type not in ['credit', 'debit'] or amount <= 0:
+            return Response({'error': 'Invalid type or amount.'}, status=400)
+            
+        try:
+            staff_user = User.objects.get(pk=staff_id)
+        except User.DoesNotExist:
+            return Response({'error': 'Staff member not found.'}, status=404)
+            
+        wallet, _ = StaffWallet.objects.get_or_create(staff=staff_user)
+        
+        WalletTransaction.objects.create(
+            wallet=wallet, type=t_type, amount=amount, note=note
+        )
+        
+        if t_type == 'credit':
+            wallet.total_earned += amount
+        else:
+            wallet.total_paid += amount
+        wallet.save()
+        
+        return Response({
+            'message': 'Direct transaction recorded successfully.',
+            'wallet_balance': str(wallet.balance)
+        })

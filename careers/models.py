@@ -5,7 +5,7 @@ class JobApplication(models.Model):
     email = models.EmailField()
     phone = models.CharField(max_length=20)
     position = models.CharField(max_length=100)
-    portfolio = models.CharField(max_length=500, blank=True, null=True)
+    portfolio = models.TextField(blank=True, null=True)
     
     # Teacher specific fields
     preferred_courses = models.CharField(max_length=500, blank=True, null=True)

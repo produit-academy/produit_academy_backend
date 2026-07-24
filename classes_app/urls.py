@@ -6,7 +6,6 @@ from .views import (
     SessionCreateView,
     SessionRosterView,
     BulkAttendanceView,
-    MentorDashboardView,
     PublicCourseListView,
     AdminCourseListCreateView,
     AdminCourseDetailView,
@@ -14,7 +13,6 @@ from .views import (
     AdminStatsView,
     AdminEnrollmentListView,
     StudentStatsView,
-    MentorAtRiskView,
     AdminStaffManagementView,
     AdminAssignStaffView,
     AdminStaffDetailView,
@@ -26,6 +24,22 @@ from .views import (
     ClassesProfileView, ClassesChangePasswordView,
     TeacherAvailabilityView, StudentTeacherSlotsView, CancelSessionView,
 )
+from .views_booking import (
+    SubjectListView,
+    TeachersBySubjectView,
+    TeacherProfileDetailView,
+    StudentBookTeacherView,
+    DummyPaymentView,
+    StudentBookingsListView,
+    StudentPaymentHistoryView,
+    TeacherProfileManageView,
+    TeacherDemoVideoManageView,
+    TeacherBookingsView,
+    CancelScheduleView,
+    AdminStudentsListView,
+    AdminBookingsListView,
+    AdminSubjectManageView,
+)
 
 urlpatterns = [
     # Auth & Config
@@ -35,13 +49,14 @@ urlpatterns = [
 
     # Public Data
     path('courses/', PublicCourseListView.as_view(), name='classes-public-courses'),
+    path('subjects/', SubjectListView.as_view(), name='classes-subjects'),
+    path('teachers/', TeachersBySubjectView.as_view(), name='classes-teachers-by-subject'),
+    path('teacher-profile/<int:pk>/', TeacherProfileDetailView.as_view(), name='classes-teacher-profile'),
 
     # Dashboard Feeds
     path('student/dashboard/', StudentDashboardView.as_view(), name='classes-student-dashboard'),
     path('teacher/dashboard/', TeacherDashboardView.as_view(), name='classes-teacher-dashboard'),
-    path('mentor/dashboard/', MentorDashboardView.as_view(), name='classes-mentor-dashboard'),
     path('student/stats/', StudentStatsView.as_view(), name='student-stats'),
-    path('mentor/at-risk/', MentorAtRiskView.as_view(), name='mentor-at-risk'),
 
     # Operations
     path('sessions/create/', SessionCreateView.as_view(), name='classes-session-create'),
@@ -56,14 +71,25 @@ urlpatterns = [
     path('student/book-session/', BookSessionView.as_view(), name='student-book-session'),
     path('teacher/session/<int:pk>/complete/', CompleteSessionView.as_view(), name='teacher-complete-session'),
 
-    # Teacher Availability & Cancellation
+    # Student Booking & Payment
+    path('student/book-teacher/', StudentBookTeacherView.as_view(), name='student-book-teacher'),
+    path('student/pay/', DummyPaymentView.as_view(), name='student-dummy-payment'),
+    path('student/bookings/', StudentBookingsListView.as_view(), name='student-bookings'),
+    path('student/payments/', StudentPaymentHistoryView.as_view(), name='student-payments'),
+
+    # Teacher Availability, Profile & Bookings
     path('teacher/availability/', TeacherAvailabilityView.as_view(), name='teacher-availability'),
+    path('teacher/manage-profile/', TeacherProfileManageView.as_view(), name='teacher-manage-profile'),
+    path('teacher/demo-videos/', TeacherDemoVideoManageView.as_view(), name='teacher-demo-videos'),
+    path('teacher/bookings/', TeacherBookingsView.as_view(), name='teacher-bookings'),
+    path('schedule/<int:pk>/cancel/', CancelScheduleView.as_view(), name='schedule-cancel'),
     path('student/teacher-slots/', StudentTeacherSlotsView.as_view(), name='student-teacher-slots'),
     path('session/<int:pk>/cancel/', CancelSessionView.as_view(), name='session-cancel'),
 
     # Admin
     path('admin/staff/', AdminStaffManagementView.as_view(), name='admin-staff-management'),
     path('admin/staff/<int:pk>/', AdminStaffDetailView.as_view(), name='admin-staff-detail'),
+    path('admin/students/', AdminStudentsListView.as_view(), name='admin-students-list'),
     path('admin/students/<int:pk>/', AdminStudentDetailView.as_view(), name='admin-student-detail'),
     path('admin/enrollments/<int:pk>/toggle-completion/', AdminEnrollmentToggleCompletionView.as_view(), name='admin-enrollment-toggle-completion'),
     path('admin/assign-staff/', AdminAssignStaffView.as_view(), name='admin-assign-staff'),
@@ -73,4 +99,6 @@ urlpatterns = [
     path('admin/enrollments/list/', AdminEnrollmentListView.as_view(), name='classes-admin-enrollment-list'),
     path('admin/stats/', AdminStatsView.as_view(), name='classes-admin-stats'),
     path('admin/analytics/user/<int:pk>/', AdminUserAnalyticsView.as_view(), name='admin-user-analytics'),
+    path('admin/bookings/', AdminBookingsListView.as_view(), name='admin-bookings-list'),
+    path('admin/subjects/', AdminSubjectManageView.as_view(), name='admin-subjects'),
 ]

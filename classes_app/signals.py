@@ -21,8 +21,7 @@ def trigger_demo_emails(sender, instance, created, **kwargs):
         new_link = instance.meeting_link
 
         if not old_link and new_link:
-            # The teacher just added the link. Send emails.
-            # Student email
+            # The teacher just added the link. Send email to student.
             try:
                 send_html_email(
                     subject='Your Demo Class is Confirmed!',
@@ -35,17 +34,3 @@ def trigger_demo_emails(sender, instance, created, **kwargs):
                 )
             except Exception as e:
                 print(f"Error sending student demo link: {e}")
-
-            # Mentor email (if assigned)
-            if instance.student.assigned_mentor:
-                try:
-                    send_html_email(
-                        subject='Demo Class Scheduled',
-                        recipient_email=instance.student.assigned_mentor.email,
-                        username=instance.student.assigned_mentor.first_name or 'Mentor',
-                        type='mentor_demo_alert',
-                        student_name=instance.student.first_name or instance.student.email.split('@')[0],
-                        time=instance.scheduled_time.strftime("%A, %b %d at %I:%M %p")
-                    )
-                except Exception as e:
-                    print(f"Error sending mentor demo alert: {e}")

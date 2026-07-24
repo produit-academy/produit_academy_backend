@@ -34,11 +34,7 @@ class IsTeacher(permissions.BasePermission):
         )
 
 
-class IsMentor(permissions.BasePermission):
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and (
-            request.user.role == 'mentor' or request.user.is_staff or request.user.is_superuser
-        )
+
 
 
 class IsClassesPlatform(permissions.BasePermission):
@@ -52,11 +48,9 @@ class IsClassesPlatform(permissions.BasePermission):
 
 
 def _is_staff_approved(user):
-    """Check if a teacher/mentor is HR-approved."""
+    """Check if a teacher is HR-approved."""
     if user.role == 'teacher':
         return getattr(getattr(user, 'classes_teacher_profile', None), 'is_approved', False)
-    elif user.role == 'mentor':
-        return getattr(getattr(user, 'classes_mentor_profile', None), 'is_approved', False)
     return False
 
 # --- Profile Endpoint ---
@@ -66,10 +60,6 @@ class ClassesMeView(APIView):
 
     def get(self, request):
         user = request.user
-        mentor_info = None
-        if user.assigned_mentor and _is_staff_approved(user.assigned_mentor):
-            m = user.assigned_mentor
-            mentor_info = {'id': m.id, 'name': f"{m.first_name} {m.last_name}", 'email': m.email}
 
         # Build per-course teacher list from Enrollments
         teachers_info = []
@@ -96,7 +86,6 @@ class ClassesMeView(APIView):
             'platform': user.platform,
             'phone_number': user.phone_number,
             'college': user.college,
-            'assigned_mentor': mentor_info,
             'assigned_teachers': teachers_info,
         })
 
@@ -137,12 +126,6 @@ class StudentDashboardView(APIView):
         late = records.filter(status='Late').count()
         pct = round((present + late) / total * 100, 1) if total > 0 else 100.0
 
-        # Assigned staff info
-        mentor_info = None
-        if user.assigned_mentor and _is_staff_approved(user.assigned_mentor):
-            m = user.assigned_mentor
-            mentor_info = {'id': m.id, 'name': f"{m.first_name} {m.last_name}", 'email': m.email}
-
         # Per-course teacher info from enrollments
         teachers_info = []
         enrollments_with_teachers = Enrollment.objects.filter(
@@ -168,7 +151,6 @@ class StudentDashboardView(APIView):
             'late_count': late,
             'attendance_percentage': pct,
             'courses': CourseSerializer(courses, many=True).data,
-            'assigned_mentor': mentor_info,
             'assigned_teachers': teachers_info,
         }
         return Response(data)
@@ -409,139 +391,7 @@ class BulkAttendanceView(APIView):
             'session_status': session.status,
         })
 
-
-# --- Mentor Dashboard ---
-
-class MentorDashboardView(APIView):
-    permission_classes = [permissions.IsAuthenticated, IsMentor]
-
-    def get(self, request):
-        user = request.user
-
-        # Students assigned to this mentor
-        assigned_students = User.objects.filter(
-            assigned_mentor=user, platform='classes', role='student'
-        )
-
-        # All students data with attendance + enrolled courses
-        all_students = []
-        at_risk = []
-        for student in assigned_students:
-            records = AttendanceRecord.objects.filter(student=student)
-            total = records.count()
-            attended = records.filter(status__in=['Present', 'Late']).count()
-            pct = round(attended / total * 100, 1) if total > 0 else 100.0
-
-            # Enrolled courses for this student
-            student_enrollments = Enrollment.objects.filter(
-                student=student
-            ).select_related('course')
-            enrolled_courses = [
-                {'id': e.course.id, 'name': e.course.name}
-                for e in student_enrollments if e.course.is_active
-            ]
-
-            student_info = {
-                'id': student.id,
-                'first_name': student.first_name,
-                'last_name': student.last_name,
-                'email': student.email,
-                'phone_number': student.phone_number,
-                'attendance_percentage': pct,
-                'total_classes': total,
-                'attended': attended,
-                'enrolled_courses': enrolled_courses,
-            }
-            all_students.append(student_info)
-            if pct < 75 and total > 0:
-                at_risk.append(student_info)
-
-        # Sort at-risk by lowest attendance first
-        at_risk.sort(key=lambda x: x['attendance_percentage'])
-
-        # Recently cancelled sessions for mentor's students
-        student_ids = assigned_students.values_list('id', flat=True)
-        cancelled_sessions = ClassSession.objects.filter(
-            student_id__in=student_ids,
-            status='Cancelled'
-        ).select_related('course', 'teacher', 'student', 'cancelled_by').order_by('-scheduled_time')[:10]
-
-        cancelled_data = []
-        for s in cancelled_sessions:
-            cancelled_data.append({
-                'id': s.id,
-                'title': s.title,
-                'course_name': s.course.name,
-                'scheduled_time': s.scheduled_time,
-                'cancel_reason': s.cancel_reason or '',
-                'cancelled_by_name': (
-                    f"{s.cancelled_by.first_name} {s.cancelled_by.last_name}".strip()
-                    if s.cancelled_by else 'Unknown'
-                ),
-                'cancelled_by_role': (
-                    'Teacher' if s.cancelled_by and s.cancelled_by == s.teacher else 'Student'
-                ) if s.cancelled_by else 'Unknown',
-                'student_name': f"{s.student.first_name} {s.student.last_name}".strip() if s.student else '',
-            })
-
-        # Rejected demos that need follow-up (student has no teacher for this course yet)
-        action_required_demos = ClassSession.objects.filter(
-            student_id__in=student_ids,
-            is_demo=True,
-            demo_outcome='Rejected'
-        ).select_related('course', 'teacher', 'student')
-        
-        action_required_data = []
-        for s in action_required_demos:
-            # check if student already has a teacher for this course
-            has_teacher = Enrollment.objects.filter(student=s.student, course=s.course, teacher__isnull=False).exists()
-            if not has_teacher:
-                action_required_data.append({
-                    'id': s.id,
-                    'course_id': s.course.id,
-                    'course_name': s.course.name,
-                    'student_id': s.student.id,
-                    'student_name': f"{s.student.first_name} {s.student.last_name}".strip(),
-                    'rejected_teacher_id': s.teacher.id,
-                    'rejected_teacher_name': f"{s.teacher.first_name} {s.teacher.last_name}".strip(),
-                })
-
-        # Mentor payment/earnings stats
-        now = timezone.now()
-        # Total hours: sum duration of all completed sessions for this mentor's students
-        mentor_sessions = ClassSession.objects.filter(
-            student_id__in=student_ids,
-            status='Completed'
-        )
-        total_mentor_minutes = mentor_sessions.aggregate(total=Sum('duration_minutes'))['total'] or 0
-        total_mentor_hours = round(total_mentor_minutes / 60, 1)
-
-        hourly_rate = 0
-        try:
-            hourly_rate = float(user.classes_mentor_profile.hourly_rate)
-        except Exception:
-            pass
-        total_earnings = round(total_mentor_hours * hourly_rate, 2)
-
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_minutes = mentor_sessions.filter(
-            scheduled_time__gte=month_start
-        ).aggregate(total=Sum('duration_minutes'))['total'] or 0
-        this_month_earnings = round((month_minutes / 60) * hourly_rate, 2)
-
-        data = {
-            'total_students': assigned_students.count(),
-            'at_risk_students': at_risk,
-            'all_students': all_students,
-            'cancelled_sessions': cancelled_data,
-            'action_required_demos': action_required_data,
-            'total_hours_worked': total_mentor_hours,
-            'hourly_rate': hourly_rate,
-            'total_earnings': total_earnings,
-            'this_month_earnings': this_month_earnings,
-        }
-        return Response(data)
-
+# --- Mentor Dashboard (REMOVED) ---
 
 # --- Admin Endpoints ---
 
@@ -622,19 +472,9 @@ class AdminBulkEnrollView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
-        # Optional staff assignment
-        mentor_id = request.data.get('mentor_id')
         teacher_id = request.data.get('teacher_id')
 
-        mentor = None
         teacher = None
-        if mentor_id:
-            try:
-                mentor = User.objects.get(pk=mentor_id, role='mentor')
-                if not _is_staff_approved(mentor):
-                    return Response({'detail': 'Selected mentor is not approved.'}, status=400)
-            except User.DoesNotExist:
-                pass
         if teacher_id:
             try:
                 teacher = User.objects.get(pk=teacher_id, role='teacher')
@@ -694,9 +534,6 @@ class AdminBulkEnrollView(APIView):
 
         # Update student profile fields if provided
         updated = False
-        if mentor and not student.assigned_mentor:
-            student.assigned_mentor = mentor
-            updated = True
         if first_name and not student.first_name:
             student.first_name = first_name
             updated = True
@@ -763,9 +600,6 @@ class AdminStatsView(APIView):
         total_teachers = User.objects.filter(
             platform='classes', role='teacher'
         ).count()
-        total_mentors = User.objects.filter(
-            platform='classes', role='mentor'
-        ).count()
         total_courses = Course.objects.filter(is_active=True).count()
         classes_month = ClassSession.objects.filter(
             scheduled_time__gte=month_start
@@ -784,14 +618,18 @@ class AdminStatsView(APIView):
         ).count()
         att_rate = round(present_records / total_records * 100, 1) if total_records > 0 else 0
 
+        # Total bookings
+        from .models import Booking
+        total_bookings = Booking.objects.count()
+
         return Response({
             'total_students': total_students,
             'total_teachers': total_teachers,
-            'total_mentors': total_mentors,
             'total_courses': total_courses,
             'total_classes_this_month': classes_month,
             'active_students_today': active_today,
             'overall_attendance_rate': att_rate,
+            'total_bookings': total_bookings,
         })
 
 
@@ -801,7 +639,7 @@ class AdminEnrollmentListView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = Enrollment.objects.select_related(
-            'student', 'student__assigned_mentor', 'course'
+            'student', 'course'
         ).all().order_by('-enrolled_at')
         course_id = self.request.query_params.get('course_id')
         if course_id:
@@ -825,35 +663,6 @@ class StudentStatsView(APIView):
         })
 
 
-# Mentor At-Risk Report (student-level assignment)
-class MentorAtRiskView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get(self, request):
-        # Find students assigned to this mentor
-        assigned_students = User.objects.filter(assigned_mentor=request.user, platform='classes', role='student')
-
-        at_risk_data = []
-        for student in assigned_students:
-            records = AttendanceRecord.objects.filter(student=student)
-            total = records.count()
-            if total > 0:
-                attended = records.filter(status__in=['Present', 'Late']).count()
-                percentage = round((attended / total * 100))
-
-                if percentage < 75:
-                    at_risk_data.append({
-                        "id": student.id,
-                        "first_name": student.first_name,
-                        "last_name": student.last_name,
-                        "email": student.email,
-                        "attendance_percentage": percentage
-                    })
-
-        at_risk_data = sorted(at_risk_data, key=lambda x: x['attendance_percentage'])
-        return Response(at_risk_data)
-
-
 # --- Admin Staff Management ---
 
 class AdminStaffManagementView(generics.ListCreateAPIView):
@@ -865,12 +674,11 @@ class AdminStaffManagementView(generics.ListCreateAPIView):
         return BasicUserSerializer
 
     def get_queryset(self):
-        qs = User.objects.filter(platform='classes', role__in=['teacher', 'mentor']).order_by('-date_joined')
+        qs = User.objects.filter(platform='classes', role='teacher').order_by('-date_joined')
         if self.request.query_params.get('approved_only') == 'true':
-            # Teachers with approved profiles OR Mentors with approved profiles
+            # Teachers with approved profiles
             qs = qs.filter(
-                Q(classes_teacher_profile__is_approved=True) | 
-                Q(classes_mentor_profile__is_approved=True)
+                classes_teacher_profile__is_approved=True
             ).distinct()
         return qs
 
@@ -912,7 +720,6 @@ class AdminAssignStaffView(APIView):
 
     def post(self, request):
         student_id = request.data.get('student_id')
-        mentor_id = request.data.get('mentor_id')
         teacher_id = request.data.get('teacher_id')
         course_id = request.data.get('course_id')  # Required for teacher assignment
 
@@ -920,17 +727,6 @@ class AdminAssignStaffView(APIView):
             student = User.objects.get(pk=student_id, role='student')
         except User.DoesNotExist:
             return Response({'detail': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        if mentor_id:
-            try:
-                mentor = User.objects.get(pk=mentor_id, role='mentor')
-                if not _is_staff_approved(mentor):
-                    return Response({'detail': 'Mentor is not approved.'}, status=status.HTTP_400_BAD_REQUEST)
-                student.assigned_mentor = mentor
-            except User.DoesNotExist:
-                return Response({'detail': 'Mentor not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif mentor_id == '':
-            student.assigned_mentor = None
 
         student.save()
 
@@ -962,7 +758,7 @@ class AdminStaffDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StaffUpdateSerializer
 
     def get_queryset(self):
-        return User.objects.filter(platform='classes', role__in=['teacher', 'mentor'])
+        return User.objects.filter(platform='classes', role='teacher')
 
 
 class AdminStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -1037,8 +833,7 @@ class AdminUserAnalyticsView(APIView):
                 'attendance_rate': attendance_rate,
                 'recent_sessions': recent_data
             }
-            if user.assigned_mentor:
-                data['user']['mentor'] = f"{user.assigned_mentor.first_name} {user.assigned_mentor.last_name}"
+
             # Teachers are per-course, list them all
             teacher_enrollments = Enrollment.objects.filter(
                 student=user, teacher__isnull=False
@@ -1060,10 +855,22 @@ class AdminUserAnalyticsView(APIView):
             avg_attendance_rate = round((present_records / total_records * 100) if total_records > 0 else 0, 1)
 
             try:
-                hourly_rate = float(user.classes_teacher_profile.hourly_rate)
-            except:
-                hourly_rate = 0
+                profile = user.classes_teacher_profile
+                hourly_rate = float(profile.hourly_rate)
                 
+                data['user']['bio'] = profile.bio
+                data['user']['qualification'] = profile.qualification
+                data['user']['experience'] = profile.experience
+                data['user']['skills'] = profile.skills
+                data['user']['certifications'] = profile.certifications
+                data['user']['languages'] = profile.languages
+                data['user']['teaching_style'] = profile.teaching_style
+                data['user']['google_meet_link'] = profile.google_meet_link
+                data['user']['profile_picture_base64'] = profile.profile_picture_base64
+                data['user']['courses'] = [c.name for c in profile.subjects.all()]
+                data['user']['taught_subjects'] = [s.name for s in profile.taught_subjects.all()]
+            except Exception as e:
+                hourly_rate = 0
             total_earnings = round((total_minutes / 60) * hourly_rate, 2)
             
             from django.utils import timezone
@@ -1097,24 +904,7 @@ class AdminUserAnalyticsView(APIView):
                 'student_breakdown': student_breakdown,
             }
 
-        elif user.role == 'mentor':
-            assigned_students = User.objects.filter(assigned_mentor=user, platform='classes', role='student')
-            total_assigned = assigned_students.count()
-            
-            # Calculate at-risk students (attendance < 75%)
-            at_risk_count = 0
-            for student in assigned_students:
-                att = AttendanceRecord.objects.filter(student=student)
-                t = att.count()
-                p = att.filter(status='Present').count()
-                rate = (p / t * 100) if t > 0 else 100
-                if rate < 75:
-                    at_risk_count += 1
 
-            data['analytics'] = {
-                'assigned_students': total_assigned,
-                'at_risk_students': at_risk_count
-            }
 
         return Response(data)
 
@@ -1130,8 +920,8 @@ class ScheduleDemoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in ['admin', 'mentor']:
-            return Response({'error': 'Only admins and mentors can schedule demos.'}, status=403)
+        if request.user.role not in ['admin']:
+            return Response({'error': 'Only admins can schedule demos.'}, status=403)
         student_id = request.data.get('student_id')
         teacher_id = request.data.get('teacher_id')
         course_id = request.data.get('course_id')
@@ -1231,7 +1021,7 @@ class RejectDemoView(APIView):
             demo.demo_outcome = 'Rejected'
             demo.save()
             
-            return Response({'message': 'Demo rejected. Your mentor will assign a new teacher soon.'})
+            return Response({'message': 'Demo rejected. Your admin will assign a new teacher soon.'})
         except ClassSession.DoesNotExist:
             return Response({'error': 'Demo not found'}, status=404)
 
@@ -1391,6 +1181,7 @@ class TeacherAvailabilityView(APIView):
             return Response({'error': 'No slots provided.'}, status=400)
 
         created = 0
+        updated = 0
         errors = []
         for slot in slots_data:
             slot_date = slot.get('date')
@@ -1419,9 +1210,12 @@ class TeacherAvailabilityView(APIView):
             )
             if was_created:
                 created += 1
+            else:
+                updated += 1
 
+        total = created + updated
         return Response({
-            'message': f'{created} new slot(s) saved successfully.',
+            'message': f'{total} slot(s) saved successfully ({created} new, {updated} updated).',
             'errors': errors if errors else None,
         })
 
@@ -1486,7 +1280,7 @@ class StudentTeacherSlotsView(APIView):
 
 
 class CancelSessionView(APIView):
-    """Cancel a scheduled session with a reason. Notifies the mentor via email."""
+    """Cancel a scheduled session with a reason. Notifies the teacher via email."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
@@ -1508,32 +1302,29 @@ class CancelSessionView(APIView):
             session.cancelled_by = user
             session.save()
 
-            # Notify the student's mentor via email
-            student = session.student
-            if student and student.assigned_mentor:
-                mentor = student.assigned_mentor
-                canceller_name = f"{user.first_name} {user.last_name}".strip() or user.username
+            # Notify the session's teacher via email if student cancels
+            teacher = session.teacher
+            if teacher:
                 canceller_role = 'Teacher' if user == session.teacher else 'Student'
-                try:
-                    send_mail(
-                        subject=f'Class Cancelled: {session.title}',
-                        message=(
-                            f"Hello {mentor.first_name or 'Mentor'},\n\n"
-                            f"A class has been cancelled:\n\n"
-                            f"Class: {session.title}\n"
-                            f"Course: {session.course.name}\n"
-                            f"Scheduled Time: {session.scheduled_time}\n"
-                            f"Cancelled By: {canceller_name} ({canceller_role})\n"
-                            f"Reason: {reason}\n\n"
-                            f"Please follow up if needed.\n\n"
-                            f"— Produit Academy"
-                        ),
-                        from_email='noreply@produitacademy.com',
-                        recipient_list=[mentor.email],
-                        fail_silently=True,
-                    )
-                except Exception as e:
-                    print(f"Failed to send cancellation email: {e}")
+                if canceller_role == 'Student':
+                    try:
+                        send_mail(
+                            subject=f'Class Cancelled: {session.title}',
+                            message=(
+                                f"Hello {teacher.first_name or 'Teacher'},\n\n"
+                                f"A class has been cancelled by the student:\n\n"
+                                f"Class: {session.title}\n"
+                                f"Course: {session.course.name}\n"
+                                f"Scheduled Time: {session.scheduled_time}\n"
+                                f"Reason: {reason}\n\n"
+                                f"— Produit Academy"
+                            ),
+                            from_email='noreply@produitacademy.com',
+                            recipient_list=[teacher.email],
+                            fail_silently=True,
+                        )
+                    except Exception as e:
+                        print(f"Failed to send cancellation email: {e}")
 
             return Response({'message': 'Session cancelled successfully.'})
         except ClassSession.DoesNotExist:
@@ -1587,9 +1378,7 @@ class ClassesProfileView(APIView):
                 }
                 for e in enrollments
             ]
-            if user.assigned_mentor and _is_staff_approved(user.assigned_mentor):
-                m = user.assigned_mentor
-                data['mentor'] = {'id': m.id, 'name': f"{m.first_name} {m.last_name}".strip(), 'email': m.email}
+
 
         return Response(data)
 
@@ -1600,8 +1389,16 @@ class ClassesProfileView(APIView):
             if field in request.data:
                 setattr(user, field, request.data[field])
         user.save()
-        return Response({'message': 'Profile updated successfully.'})
-
+        
+        # Generate new token with updated claims (e.g. first_name)
+        from api.serializers import MyTokenObtainPairSerializer
+        refresh = MyTokenObtainPairSerializer.get_token(user)
+        
+        return Response({
+            'message': 'Profile updated successfully.',
+            'access': str(refresh.access_token),
+            'refresh': str(refresh)
+        })
 
 class ClassesChangePasswordView(APIView):
     """Change password for any authenticated classes user."""

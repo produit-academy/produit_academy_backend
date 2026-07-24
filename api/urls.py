@@ -7,6 +7,7 @@ from .views import (
     ProfileView, BranchListView,
     StudentDashboardView, AdminDashboardView,
     StudentListView, StudentManageView,
+    StudentOTPRegisterView, StudentOTPLoginView, VerifyOTPAndLoginView,
 )
 
 urlpatterns = [
@@ -27,4 +28,9 @@ urlpatterns = [
     path('admin/dashboard/', AdminDashboardView.as_view(), name='admin_dashboard'),
     path('admin/students/', StudentListView.as_view(), name='student-list'),
     path('admin/students/<int:pk>/', StudentManageView.as_view(), name='student-manage'),
+
+    # --- Classes Platform Student OTP Auth ---
+    path('student/register/', StudentOTPRegisterView.as_view(), name='student-otp-register'),
+    path('student/otp-login/', StudentOTPLoginView.as_view(), name='student-otp-login'),
+    path('student/verify-otp-login/', VerifyOTPAndLoginView.as_view(), name='student-verify-otp-login'),
 ]

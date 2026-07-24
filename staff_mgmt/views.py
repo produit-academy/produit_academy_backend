@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskComment, Complaint, ContactInquiry, StaffWallet, WalletTransaction
-from classes_app.models import Course, TeacherProfile, MentorProfile
+from classes_app.models import Course, TeacherProfile, Subject
 from api.views import send_html_email
 import random
 import string
@@ -63,7 +63,6 @@ class SuperAdminUserListView(generics.ListAPIView):
         
         # Exclude unapproved teachers and mentors
         queryset = queryset.exclude(role='teacher', classes_teacher_profile__is_approved=False)
-        queryset = queryset.exclude(role='mentor', classes_mentor_profile__is_approved=False)
         
         platform = self.request.query_params.get('platform')
         if platform:
@@ -287,29 +286,24 @@ class OnboardStaffView(APIView):
             return Response({'error': 'Only HR and admins can view staff.'}, status=403)
 
         staff = User.objects.filter(
-            platform='classes', role__in=['teacher', 'mentor']
+            platform='classes', role__in=['teacher']
         ).order_by('-date_joined')
 
         def _get_staff_approved(u):
             if u.role == 'teacher':
                 return getattr(getattr(u, 'classes_teacher_profile', None), 'is_approved', False)
-            elif u.role == 'mentor':
-                return getattr(getattr(u, 'classes_mentor_profile', None), 'is_approved', False)
             return False
 
         def _get_staff_hourly_rate(u):
             if u.role == 'teacher':
                 return getattr(getattr(u, 'classes_teacher_profile', None), 'hourly_rate', 0)
-            elif u.role == 'mentor':
-                return getattr(getattr(u, 'classes_mentor_profile', None), 'hourly_rate', 0)
             return 0
 
-        # Prefetch teacher profiles with subjects to avoid N+1
         teacher_profiles = {}
         for tp in TeacherProfile.objects.filter(
             user__in=staff
-        ).prefetch_related('subjects').select_related('user'):
-            teacher_profiles[tp.user_id] = list(tp.subjects.values('id', 'name'))
+        ).prefetch_related('taught_subjects').select_related('user'):
+            teacher_profiles[tp.user_id] = list(tp.taught_subjects.values('id', 'name'))
 
         data = [{
             'id': u.id,
@@ -334,15 +328,15 @@ class OnboardStaffView(APIView):
             return Response({'error': 'Only HR and admins can onboard staff.'}, status=403)
 
         email = request.data.get('email')
-        role = request.data.get('role') # 'teacher' or 'mentor'
+        role = request.data.get('role') # 'teacher'
         subjects = request.data.get('subjects', []) # list of course IDs
         first_name = request.data.get('first_name', '')
         last_name = request.data.get('last_name', '')
         phone_number = request.data.get('phone_number', '')
         hourly_rate = request.data.get('hourly_rate', 0)
 
-        if not email or role not in ['teacher', 'mentor']:
-            return Response({'error': 'Valid email and role (teacher/mentor) required.'}, status=400)
+        if not email or role not in ['teacher']:
+            return Response({'error': 'Valid email and role (teacher) required.'}, status=400)
             
         if User.objects.filter(email=email).exists():
             return Response({'error': 'User already exists.'}, status=400)
@@ -362,9 +356,11 @@ class OnboardStaffView(APIView):
         if role == 'teacher':
             profile = TeacherProfile.objects.create(user=user, hourly_rate=hourly_rate)
             if subjects:
-                profile.subjects.set(Course.objects.filter(id__in=subjects))
-        elif role == 'mentor':
-            MentorProfile.objects.create(user=user, hourly_rate=hourly_rate)
+                subs = Subject.objects.filter(id__in=subjects)
+                profile.taught_subjects.set(subs)
+                # Also add the parent courses to profile.subjects
+                course_ids = subs.values_list('course_id', flat=True).distinct()
+                profile.subjects.set(Course.objects.filter(id__in=course_ids))
                 
         email_error = None
         try:
@@ -392,7 +388,7 @@ class OnboardStaffDetailView(APIView):
 
     def get_staff_user(self, pk):
         try:
-            return User.objects.get(pk=pk, platform='classes', role__in=['teacher', 'mentor'])
+            return User.objects.get(pk=pk, platform='classes', role__in=['teacher'])
         except User.DoesNotExist:
             return None
 
@@ -413,15 +409,14 @@ class OnboardStaffDetailView(APIView):
         # Update subjects if teacher
         if user.role == 'teacher' and 'subjects' in request.data:
             profile, _ = TeacherProfile.objects.get_or_create(user=user)
-            profile.subjects.set(Course.objects.filter(id__in=request.data['subjects']))
+            subs = Subject.objects.filter(id__in=request.data['subjects'])
+            profile.taught_subjects.set(subs)
+            course_ids = subs.values_list('course_id', flat=True).distinct()
+            profile.subjects.set(Course.objects.filter(id__in=course_ids))
 
         if 'hourly_rate' in request.data:
             if user.role == 'teacher':
                 profile, _ = TeacherProfile.objects.get_or_create(user=user)
-                profile.hourly_rate = request.data['hourly_rate']
-                profile.save()
-            elif user.role == 'mentor':
-                profile, _ = MentorProfile.objects.get_or_create(user=user)
                 profile.hourly_rate = request.data['hourly_rate']
                 profile.save()
 
@@ -448,7 +443,7 @@ class ApproveStaffView(APIView):
             
         user_id = request.data.get('user_id')
         try:
-            user = User.objects.get(id=user_id, role__in=['teacher', 'mentor'])
+            user = User.objects.get(id=user_id, role__in=['teacher'])
             is_newly_verified = False
             if not user.is_verified:
                 # Generate random password
@@ -462,12 +457,6 @@ class ApproveStaffView(APIView):
                 profile, _ = TeacherProfile.objects.get_or_create(user=user)
                 if profile.is_approved:
                     return Response({'error': 'Teacher already approved.'}, status=400)
-                profile.is_approved = True
-                profile.save()
-            elif user.role == 'mentor':
-                profile, _ = MentorProfile.objects.get_or_create(user=user)
-                if profile.is_approved:
-                    return Response({'error': 'Mentor already approved.'}, status=400)
                 profile.is_approved = True
                 profile.save()
             
@@ -499,13 +488,9 @@ class RevokeStaffView(APIView):
             
         user_id = request.data.get('user_id')
         try:
-            user = User.objects.get(id=user_id, role__in=['teacher', 'mentor'])
+            user = User.objects.get(id=user_id, role__in=['teacher'])
             if user.role == 'teacher':
                 profile, _ = TeacherProfile.objects.get_or_create(user=user)
-                profile.is_approved = False
-                profile.save()
-            elif user.role == 'mentor':
-                profile, _ = MentorProfile.objects.get_or_create(user=user)
                 profile.is_approved = False
                 profile.save()
             
@@ -822,8 +807,8 @@ class StaffWalletView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in ['staff', 'manager', 'teacher', 'mentor']:
-            raise PermissionDenied('Only staff/teachers/mentors can view their wallet.')
+        if request.user.role not in ['staff', 'manager', 'teacher']:
+            raise PermissionDenied('Only staff/teachers can view their wallet.')
         wallet, _ = StaffWallet.objects.get_or_create(staff=request.user)
         serializer = StaffWalletSerializer(wallet)
         return Response(serializer.data)
@@ -839,11 +824,11 @@ class ManagerStaffListView(generics.ListAPIView):
     serializer_class = ManagerStaffSerializer
 
     def get_queryset(self):
-        if not is_admin_or_manager(self.request.user):
-            raise PermissionDenied()
+        if not is_manager(self.request.user) and not is_admin(self.request.user):
+            raise PermissionDenied('Only managers and admins can view all staff.')
         queryset = User.objects.filter(
-            role__in=['staff', 'manager', 'teacher', 'mentor']
-        ).order_by('-date_joined')
+            role__in=['staff', 'manager', 'teacher']
+        ).exclude(id=self.request.user.id).order_by('-date_joined')
         role = self.request.query_params.get('role')
         if role:
             queryset = queryset.filter(role=role)

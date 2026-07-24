@@ -4,6 +4,7 @@ from django.utils import timezone
 from django.utils.html import strip_tags
 from datetime import timedelta
 import random
+from django.core.cache import cache
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -43,9 +44,7 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
     elif type == 'demo_link':
         title = "Your Demo Class is Confirmed!"
         intro = f"Your Demo Class with {kwargs.get('teacher_name', 'your teacher')} is scheduled."
-    elif type == 'mentor_demo_alert':
-        title = "Demo Class Scheduled"
-        intro = f"Your assigned student, {kwargs.get('student_name', 'a student')}, has a Demo Class scheduled."
+
     else: # resend
         title = "New OTP Request"
         intro = "We received a request to resend your verification code."
@@ -71,7 +70,7 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
                     <div style="background-color: #f8fafc; border-left: 4px solid #0070f3; padding: 15px 20px; margin: 25px 0; border-radius: 0 8px 8px 0;">
                         <h3 style="margin-top: 0; color: #111; font-size: 16px;">What's included in this Agreement?</h3>
                         <ul style="margin-bottom: 0; padding-left: 20px; font-size: 14px; color: #444;">
-                            <li style="margin-bottom: 8px;"><strong>Role Commitment:</strong> Agreement to provide high-quality, dedicated teaching or mentorship services to your assigned students.</li>
+                            <li style="margin-bottom: 8px;"><strong>Role Commitment:</strong> Agreement to provide high-quality, dedicated teaching services to your assigned students.</li>
                             <li style="margin-bottom: 8px;"><strong>Platform Guidelines:</strong> Adherence to Produit Academy's teaching standards, code of conduct, and operational workflows.</li>
                             <li style="margin-bottom: 8px;"><strong>Confidentiality:</strong> Protection of student data and our proprietary educational materials.</li>
                             <li><strong>Terms & Privacy:</strong> Acceptance of our standard Terms of Service and Privacy Policy.</li>
@@ -104,13 +103,7 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
                     </div>
                     <p>Please log in 5 minutes early.</p>
         """
-    elif type == 'mentor_demo_alert':
-        message_body = f"""
-                    <p>Hi <strong>{username}</strong>,</p>
-                    <p>{intro}</p>
-                    <p><strong>Time:</strong> {kwargs.get('time', 'TBA')}</p>
-                    <p>Log in to your mentor dashboard to view the session.</p>
-        """
+
     elif type == 'staff_credentials':
         password = kwargs.get('password', '')
         message_body = f"""
@@ -186,14 +179,21 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
     """
 
     plain_message = strip_tags(html_content)
-    send_mail(
-        subject,
-        plain_message,
-        from_email or settings.DEFAULT_FROM_EMAIL,
-        [recipient_email],
-        html_message=html_content,
-        fail_silently=False,
-    )
+    try:
+        send_mail(
+            subject,
+            plain_message,
+            from_email or settings.DEFAULT_FROM_EMAIL,
+            [recipient_email],
+            html_message=html_content,
+            fail_silently=False,
+        )
+    except Exception as e:
+        print(f"\n--- EMAIL SENDING FAILED ---")
+        print(f"Error: {e}")
+        if otp:
+            print(f"DEBUG OTP for {recipient_email}: {otp}")
+        print("----------------------------\n")
 
 # --- AUTHENTICATION & SESSION MANAGEMENT ---
 
@@ -269,7 +269,7 @@ class VerifyAgreementView(APIView):
         otp = request.data.get('otp')
         
         try:
-            user = User.objects.get(email=email, role__in=['teacher', 'mentor'])
+            user = User.objects.get(email=email, role__in=['teacher'])
             if user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
                 user.otp = None
                 user.save()
@@ -374,3 +374,190 @@ class StudentManageView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAdminUser]
     queryset = User.objects.all()
     serializer_class = UserSerializer
+
+
+# ============================================================
+# CLASSES PLATFORM — Student OTP Registration & Login
+# ============================================================
+
+class StudentOTPRegisterView(APIView):
+    """
+    Student self-registration for classes platform.
+    POST: { full_name, phone_number, email }
+    Creates user with unusable password, sends OTP email.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        full_name = request.data.get('full_name', '').strip()
+        phone_number = request.data.get('phone_number', '').strip()
+        email = request.data.get('email', '').strip().lower()
+
+        if not all([full_name, phone_number, email]):
+            return Response({'error': 'full_name, phone_number, and email are required.'}, status=400)
+
+        # Check if user already exists globally
+        if User.objects.filter(email=email).exists():
+            return Response({'error': 'An account with this email already exists. Please login instead.'}, status=400)
+
+        # Parse name
+        name_parts = full_name.split(' ', 1)
+        first_name = name_parts[0]
+        last_name = name_parts[1] if len(name_parts) > 1 else ''
+
+        # Store in cache instead of creating user immediately
+        otp = str(random.randint(100000, 999999))
+        if settings.DEBUG:
+            print(f"\n[DEBUG] Registration OTP for {email}: {otp}\n")
+        
+        cache.set(
+            f"register_otp_{email}",
+            {
+                'otp': otp,
+                'first_name': first_name,
+                'last_name': last_name,
+                'phone_number': phone_number,
+            },
+            timeout=600  # 10 minutes
+        )
+
+        try:
+            send_html_email(
+                subject='Welcome to Produit Academy! Verify Your Email',
+                recipient_email=email,
+                username=first_name,
+                otp=otp,
+                type='signup',
+            )
+        except Exception as e:
+            pass  # Log but don't fail registration
+
+        return Response({
+            'message': 'Registration successful! Please check your email for the OTP.',
+            'email': email,
+        }, status=201)
+
+
+class StudentOTPLoginView(APIView):
+    """
+    Student login via OTP for classes platform.
+    POST: { email }
+    Sends OTP to email, user verifies on next step.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower()
+        if not email:
+            return Response({'error': 'Email is required.'}, status=400)
+
+        try:
+            user = User.objects.get(email=email, role='student')
+        except User.DoesNotExist:
+            return Response({'error': 'No student account found with this email.'}, status=404)
+
+        # Rate limit: prevent OTP spam
+        if user.otp_expiry and user.otp_expiry > timezone.now() - timedelta(minutes=9):
+            time_left = user.otp_expiry - timezone.now()
+            if time_left.total_seconds() > 540:  # Less than 1 min since last OTP
+                return Response({'error': 'Please wait before requesting another OTP.'}, status=429)
+
+        otp = str(random.randint(100000, 999999))
+        if settings.DEBUG:
+            print(f"\n[DEBUG] Login OTP for {email}: {otp}\n")
+            
+        user.otp = otp
+        user.otp_expiry = timezone.now() + timedelta(minutes=10)
+        user.save()
+
+        try:
+            send_html_email(
+                subject='Your Login OTP - Produit Academy',
+                recipient_email=email,
+                username=user.first_name or email.split('@')[0],
+                otp=otp,
+                type='resend',
+            )
+        except Exception:
+            pass
+
+        return Response({'message': 'OTP sent to your email.', 'email': email})
+
+
+class VerifyOTPAndLoginView(APIView):
+    """
+    Verify OTP and return JWT tokens directly.
+    POST: { email, otp }
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower()
+        otp = request.data.get('otp', '').strip()
+
+        if not email or not otp:
+            return Response({'error': 'Email and OTP are required.'}, status=400)
+
+        try:
+            user = User.objects.get(email=email)
+            # Existing user login flow
+            if not user.otp or user.otp != otp:
+                return Response({'error': 'Invalid OTP.'}, status=400)
+            if user.otp_expiry and timezone.now() > user.otp_expiry:
+                return Response({'error': 'OTP has expired. Please request a new one.'}, status=400)
+            
+            # Mark verified and clear OTP
+            user.is_verified = True
+            user.otp = None
+            user.otp_expiry = None
+            user.save()
+            
+        except User.DoesNotExist:
+            # Registration flow: check cache
+            cached_data = cache.get(f"register_otp_{email}")
+            if not cached_data:
+                return Response({'error': 'OTP has expired or user not found. Please register again.'}, status=404)
+                
+            if cached_data['otp'] != otp:
+                return Response({'error': 'Invalid OTP.'}, status=400)
+                
+            # OTP is valid, create the user now
+            user = User.objects.create(
+                username=email,
+                email=email,
+                first_name=cached_data['first_name'],
+                last_name=cached_data['last_name'],
+                phone_number=cached_data['phone_number'],
+                role='student',
+                platform='classes',
+                is_active=True,
+                is_verified=True,
+            )
+            user.set_unusable_password()
+            user.save()
+            cache.delete(f"register_otp_{email}")
+
+        # Generate JWT tokens with custom claims (same as normal login)
+        from .serializers import MyTokenObtainPairSerializer
+        refresh = MyTokenObtainPairSerializer.get_token(user)
+        access_token_str = str(refresh.access_token)
+
+        # Single Session Enforcement (STUDENTS ONLY)
+        if user.role == 'student' and not user.is_staff and not user.is_superuser:
+            from .models import Session
+            Session.objects.filter(user=user).delete()
+            Session.objects.create(user=user, session_key=access_token_str)
+
+        return Response({
+            'message': 'Login successful!',
+            'access': access_token_str,
+            'refresh': str(refresh),
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'role': user.role,
+                'platform': user.platform,
+            },
+        })

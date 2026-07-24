@@ -1,78 +1,56 @@
-# Produit Academy Backend
+# Produit Academy - Centralized Backend
 
-This is the backend API for Produit Academy, built with Django and Django REST Framework.
+This is the central Django REST Framework backend that powers all of the Produit Academy frontend platforms (Classes, Staff, Main, Careers, GATE).
+
+## Features
+- **Authentication**: JWT-based authentication using `djangorestframework_simplejwt`.
+- **Database**: PostgreSQL integration for relational data storage.
+- **API Endpoints**: RESTful APIs for student dashboards, booking slots, teacher onboarding, payments, and mock tests.
+- **Emailing**: Configured with `django-anymail`.
 
 ## Tech Stack
-
-- **Framework**: Django
-- **API**: Django REST Framework
-- **Server**: Gunicorn (Production), Django Dev Server (Local)
-- **Database**: SQLite (Local), Postgres (Production recommended)
+- Python 3.x
+- Django 5.2
+- Django REST Framework 3.16
+- PostgreSQL (`psycopg2-binary`)
+- Simple JWT
 
 ## Getting Started
 
 ### Prerequisites
+Make sure you have Python installed and PostgreSQL running on your machine.
 
-- Python 3.9+
-- pip
-- virtualenv (recommended)
+### Setup Instructions
 
-### Installation
-
-1. Navigate to the backend directory:
-   ```bash
-   cd produit_academy_backend
-   ```
-2. Create a virtual environment:
+1. **Create and activate a virtual environment**:
    ```bash
    python -m venv venv
+   # Windows
+   venv\Scripts\activate
+   # macOS/Linux
+   source venv/bin/activate
    ```
-3. Activate the virtual environment:
-   - **Windows**: `venv\Scripts\activate`
-   - **macOS/Linux**: `source venv/bin/activate`
-4. Install dependencies:
+
+2. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-### Database Setup
+3. **Environment Variables**:
+   Create a `.env` file in the root of the project with your local database credentials and secret keys.
 
-Run migrations to set up the database schema:
+4. **Database Migrations**:
+   ```bash
+   python manage.py makemigrations
+   python manage.py migrate
+   ```
 
-```bash
-python manage.py migrate
-```
+5. **Run the Development Server**:
+   ```bash
+   python manage.py runserver
+   ```
 
-### Running Locally
+The API will be available at `http://127.0.0.1:8000/`.
 
-Start the development server:
-
-```bash
-python manage.py runserver
-```
-
-The API will be available at `http://localhost:8000`.
-
-## Deployment
-
-The project includes specific files for deployment (e.g., on Render, Heroku):
-
-- `build.sh`: Script to install dependencies, collect static files, and run migrations.
-- `Procfile`: Command to run the application using Gunicorn.
-
-### Build Script
-```bash
-./build.sh
-```
-
-### Production Server
-```bash
-gunicorn produit_academy_backend.wsgi
-```
-
-## Project Structure
-
-- `produit_academy_backend/`: Project settings and WSGI/ASGI config.
-- `api/`: Main application logic (models, views, serializers).
-- `media/`: User-uploaded content.
-- `manage.py`: Django command-line utility.
+## API Documentation
+Check the `urls.py` files within specific apps for detailed endpoint structures. Ensure CORS is configured properly via `django-cors-headers` to accept requests from the various Next.js frontends during local development.

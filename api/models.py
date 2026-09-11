@@ -30,6 +30,14 @@ class User(AbstractUser):
     otp = models.CharField(max_length=6, blank=True, null=True) 
     otp_expiry = models.DateTimeField(blank=True, null=True)
 
+    ACCOUNT_STATUS_CHOICES = (
+        ('active', 'Active'),
+        ('hold', 'On Hold'),
+        ('banned', 'Banned'),
+    )
+    account_status = models.CharField(max_length=20, choices=ACCOUNT_STATUS_CHOICES, default='active')
+    status_reason = models.TextField(blank=True, default='')
+
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['username']
 

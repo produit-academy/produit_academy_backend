@@ -540,6 +540,104 @@ class CancelScheduleView(APIView):
 # ADMIN ENDPOINTS
 # ============================================================
 
+def send_student_action_notification(student_email, student_name, action_type, reason=''):
+    action_titles = {
+        'delete': ('Account Removed - Produit Classes', 'Account Removed', 'Your student account has been removed by the administration.', '#e74c3c'),
+        'hold': ('Account Placed on Hold - Produit Classes', 'Account Placed on Hold', 'Your student account has been temporarily placed on hold by the administration.', '#f39c12'),
+        'ban': ('Account Suspended - Produit Classes', 'Account Suspended', 'Your student account has been suspended/banned by the administration.', '#c0392b'),
+        'activate': ('Account Reactivated - Produit Classes', 'Account Reactivated', 'Your student account has been reactivated. You may now log in and attend your classes.', '#27ae60'),
+    }
+    email_type = f"student_{action_type}"
+    subject, badge_text, intro_text, badge_color = action_titles.get(
+        action_type,
+        ('Account Status Update - Produit Classes', 'Status Update', 'Your account status has been updated.', '#3498db')
+    )
+
+    reason_html = ""
+    reason_plain = ""
+    if reason:
+        reason_html = f"""
+        <div style="margin: 20px 0; padding: 14px 18px; background-color: #f8fafc; border-left: 4px solid {badge_color}; border-radius: 4px;">
+            <p style="margin: 0; font-size: 13px; color: #64748b; font-weight: 600; text-transform: uppercase;">Reason / Details:</p>
+            <p style="margin: 6px 0 0; font-size: 15px; color: #1e293b;">{reason}</p>
+        </div>
+        """
+        reason_plain = f"\n\nReason / Details:\n{reason}\n"
+
+    cta_html = ""
+    if action_type == 'activate':
+        cta_html = """
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="https://classes.produitacademy.com/login" style="background-color: #27ae60; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px; display: inline-block;">Log In to Produit Classes</a>
+        </div>
+        """
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="margin: 0; padding: 20px; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #334155; line-height: 1.6;">
+        <div style="max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.06); border: 1px solid #e2e8f0;">
+            <div style="background: #0f172a; padding: 24px 30px; text-align: center;">
+                <h1 style="margin: 0; color: #ffffff; font-size: 20px; font-weight: 700; letter-spacing: 0.5px;">Produit Classes</h1>
+                <p style="margin: 4px 0 0; color: #94a3b8; font-size: 13px;">Official Administration Notice</p>
+            </div>
+            <div style="padding: 30px;">
+                <div style="display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; background: {badge_color}18; color: {badge_color}; margin-bottom: 16px;">
+                    {badge_text}
+                </div>
+                <h2 style="margin: 0 0 16px; font-size: 19px; color: #0f172a;">Hello {student_name},</h2>
+                <p style="margin: 0 0 16px; font-size: 15px;">{intro_text}</p>
+                {reason_html}
+                {cta_html}
+                <p style="margin: 20px 0 0; font-size: 13px; color: #64748b;">
+                    If you have any questions or require assistance, please contact the administration team at <a href="mailto:support@produitacademy.com" style="color: #2563eb; text-decoration: underline;">support@produitacademy.com</a>.
+                </p>
+            </div>
+            <div style="background: #f8fafc; padding: 16px 30px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8;">
+                &copy; {timezone.now().year} Produit Academy. All rights reserved.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    plain_message = f"Hello {student_name},\n\n{intro_text}{reason_plain}\nIf you have any questions, please contact us at support@produitacademy.com.\n\nProduit Classes Team"
+
+    from django.db import connection
+    try:
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[student_email],
+            html_message=html_content,
+            fail_silently=True,
+        )
+        try:
+            connection.close_if_unusable_or_obsolete()
+            EmailLog.objects.create(
+                recipient_email=student_email,
+                subject=subject,
+                email_type=email_type,
+                status='sent',
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            connection.close_if_unusable_or_obsolete()
+            EmailLog.objects.create(
+                recipient_email=student_email,
+                subject=subject,
+                email_type=email_type,
+                status='failed',
+                error_message=str(e)[:500],
+            )
+        except Exception:
+            pass
+
+
 class AdminStudentsListView(generics.ListAPIView):
     """View-only list of registered students for admin."""
     permission_classes = [permissions.IsAdminUser]
@@ -565,8 +663,88 @@ class AdminStudentsListView(generics.ListAPIView):
             'phone': s.phone_number or '',
             'registered': s.date_joined.isoformat(),
             'is_active': s.is_active,
+            'account_status': getattr(s, 'account_status', 'active' if s.is_active else 'hold'),
+            'status_reason': getattr(s, 'status_reason', '') or '',
         } for s in students[:100]]
         return Response(data)
+
+
+class AdminStudentActionView(APIView):
+    """
+    Admin actions on a student: delete, hold, ban, activate.
+    POST /api/classes/admin/students/<pk>/action/
+    Body: { "action": "delete"|"hold"|"ban"|"activate", "reason": "optional note" }
+    """
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, pk):
+        from api.models import Session
+        try:
+            student = User.objects.get(pk=pk, role='student')
+        except User.DoesNotExist:
+            return Response({'error': 'Student not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        action = request.data.get('action', '').strip().lower()
+        reason = request.data.get('reason', '').strip()
+        student_email = student.email
+        student_name = f"{student.first_name} {student.last_name}".strip() or student.username
+
+        if action == 'delete':
+            send_student_action_notification(student_email, student_name, 'delete', reason)
+            student.delete()
+            return Response({
+                'message': f'Student {student_name} deleted successfully and confirmation email sent.',
+                'action': 'delete',
+            })
+
+        elif action == 'hold':
+            student.is_active = False
+            student.account_status = 'hold'
+            student.status_reason = reason
+            student.save()
+            Session.objects.filter(user=student).delete()
+            send_student_action_notification(student_email, student_name, 'hold', reason)
+            return Response({
+                'message': f'Student {student_name} placed on hold and notification email sent.',
+                'action': 'hold',
+                'account_status': 'hold',
+                'is_active': False,
+                'status_reason': reason,
+            })
+
+        elif action in ['ban', 'reban']:
+            student.is_active = False
+            student.account_status = 'banned'
+            student.status_reason = reason
+            student.save()
+            Session.objects.filter(user=student).delete()
+            send_student_action_notification(student_email, student_name, 'ban', reason)
+            return Response({
+                'message': f'Student {student_name} banned and notification email sent.',
+                'action': 'ban',
+                'account_status': 'banned',
+                'is_active': False,
+                'status_reason': reason,
+            })
+
+        elif action in ['activate', 'unban']:
+            student.is_active = True
+            student.account_status = 'active'
+            student.status_reason = ''
+            student.save()
+            send_student_action_notification(student_email, student_name, 'activate', reason)
+            return Response({
+                'message': f'Student {student_name} reactivated and notification email sent.',
+                'action': 'activate',
+                'account_status': 'active',
+                'is_active': True,
+                'status_reason': '',
+            })
+
+        else:
+            return Response({
+                'error': f'Invalid action "{action}". Valid actions are: delete, hold, ban, activate.'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminBookingsListView(generics.ListAPIView):

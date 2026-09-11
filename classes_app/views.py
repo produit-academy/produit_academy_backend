@@ -174,11 +174,21 @@ class TeacherDashboardView(APIView):
 
         # Only courses this teacher is assigned to (via TeacherProfile subjects)
         from .models import TeacherProfile
+        assigned_subjects = []
         try:
             teacher_profile = TeacherProfile.objects.get(user=user)
             courses = teacher_profile.subjects.filter(is_active=True)
+            for s in teacher_profile.taught_subjects.filter(is_active=True).select_related('course'):
+                assigned_subjects.append({
+                    'id': s.id,
+                    'name': s.name,
+                    'icon': s.icon or '',
+                    'course_id': s.course.id if s.course else None,
+                    'course_name': s.course.name if s.course else '',
+                })
         except TeacherProfile.DoesNotExist:
             courses = Course.objects.none()
+            assigned_subjects = []
 
         # Upcoming scheduled classes
         upcoming = ClassSession.objects.filter(
@@ -249,6 +259,7 @@ class TeacherDashboardView(APIView):
             'this_month_earnings': this_month_earnings,
             'total_students': assigned_students.count(),
             'courses': CourseSerializer(courses, many=True).data,
+            'assigned_subjects': assigned_subjects,
             'assigned_students': students_data,
         }
         return Response(data)

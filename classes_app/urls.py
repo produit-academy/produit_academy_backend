@@ -37,6 +37,7 @@ from .views_booking import (
     TeacherBookingsView,
     CancelScheduleView,
     AdminStudentsListView,
+    AdminStudentActionView,
     AdminBookingsListView,
     AdminSubjectManageView,
 )
@@ -91,6 +92,7 @@ urlpatterns = [
     path('admin/staff/<int:pk>/', AdminStaffDetailView.as_view(), name='admin-staff-detail'),
     path('admin/students/', AdminStudentsListView.as_view(), name='admin-students-list'),
     path('admin/students/<int:pk>/', AdminStudentDetailView.as_view(), name='admin-student-detail'),
+    path('admin/students/<int:pk>/action/', AdminStudentActionView.as_view(), name='admin-student-action'),
     path('admin/enrollments/<int:pk>/toggle-completion/', AdminEnrollmentToggleCompletionView.as_view(), name='admin-enrollment-toggle-completion'),
     path('admin/assign-staff/', AdminAssignStaffView.as_view(), name='admin-assign-staff'),
     path('admin/courses/', AdminCourseListCreateView.as_view(), name='classes-admin-courses'),

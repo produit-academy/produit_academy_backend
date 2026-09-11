@@ -456,6 +456,14 @@ class StudentOTPLoginView(APIView):
         except User.DoesNotExist:
             return Response({'error': 'No student account found with this email.'}, status=404)
 
+        # Account status check
+        if not user.is_active or user.account_status in ['banned', 'hold']:
+            if user.account_status == 'hold':
+                msg = f"Your account is currently on hold: {user.status_reason}" if user.status_reason else "Your account is currently on hold. Please contact support."
+            else:
+                msg = f"Your account has been suspended: {user.status_reason}" if user.status_reason else "Your account has been suspended. Please contact support."
+            return Response({'error': msg}, status=status.HTTP_403_FORBIDDEN)
+
         # Rate limit: prevent OTP spam
         if user.otp_expiry and user.otp_expiry > timezone.now() - timedelta(minutes=9):
             time_left = user.otp_expiry - timezone.now()
@@ -500,6 +508,8 @@ class VerifyOTPAndLoginView(APIView):
 
         try:
             user = User.objects.get(email=email)
+            if not user.is_active or user.account_status in ['banned', 'hold']:
+                return Response({'error': 'Account is inactive or suspended. Please contact support.'}, status=status.HTTP_403_FORBIDDEN)
             # Existing user login flow
             if not user.otp or user.otp != otp:
                 return Response({'error': 'Invalid OTP.'}, status=400)

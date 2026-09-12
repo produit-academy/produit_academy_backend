@@ -1,12 +1,19 @@
 """
 New views for course browsing flow, teacher profiles, booking, and payment.
 """
+import json
+import logging
+import razorpay
 from datetime import timedelta, date as dt_date
 from decimal import Decimal
 
 from django.utils import timezone
+from django.db.models import Count, Q
 from django.core.mail import send_mail
+from django.core.cache import cache
 from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 
 from rest_framework import permissions, status, generics
 from rest_framework.response import Response
@@ -17,8 +24,15 @@ from api.models import User
 from .models import (
     Course, Subject, TeacherProfile, TeacherAvailability,
     TeacherDemoVideo, Booking, BookingSchedule, ClassSession,
-    Enrollment, EmailLog, PLATFORM_FEE,
+    Enrollment, EmailLog, PLATFORM_FEE, PaymentTransaction,
 )
+from .services.payment_service import confirm_booking_payment
+
+logger = logging.getLogger(__name__)
+
+def get_razorpay_client():
+    return razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+
 from .serializers import (
     SubjectSerializer, TeacherProfileCardSerializer,
     TeacherProfileDetailSerializer, TeacherDemoVideoSerializer,
@@ -54,10 +68,23 @@ class SubjectListView(generics.ListAPIView):
 
     def get_queryset(self):
         course_id = self.request.query_params.get('course_id')
-        qs = Subject.objects.filter(is_active=True)
+        qs = Subject.objects.filter(is_active=True).annotate(
+            _teacher_count=Count('teachers', filter=Q(teachers__is_approved=True), distinct=True)
+        )
         if course_id:
             qs = qs.filter(course_id=course_id)
         return qs.select_related('course')
+
+    def list(self, request, *args, **kwargs):
+        course_id = request.query_params.get('course_id', 'all')
+        cache_key = f"subjects_course_{course_id}"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+
+        response = super().list(request, *args, **kwargs)
+        cache.set(cache_key, response.data, timeout=120)  # 2 minutes
+        return response
 
 
 class TeachersBySubjectView(APIView):
@@ -69,15 +96,42 @@ class TeachersBySubjectView(APIView):
         if not subject_id:
             return Response({'error': 'subject_id is required'}, status=400)
 
-        profiles = TeacherProfile.objects.filter(
+        cache_key = f"teachers_subject_{subject_id}"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+
+        try:
+            subject = Subject.objects.get(id=subject_id, is_active=True)
+            subject_name = subject.name
+        except Subject.DoesNotExist:
+            return Response({'error': 'Subject not found'}, status=404)
+
+        profiles = list(TeacherProfile.objects.filter(
             is_approved=True,
             taught_subjects__id=subject_id
-        ).select_related('user')
+        ).select_related('user').prefetch_related('taught_subjects'))
+
+        # Batch query active availability to avoid N+1 queries
+        today = dt_date.today()
+        user_ids = [p.user_id for p in profiles]
+        available_user_ids = set(
+            TeacherAvailability.objects.filter(
+                teacher_id__in=user_ids,
+                date__gte=today
+            ).values_list('teacher_id', flat=True)
+        )
 
         serializer = TeacherProfileCardSerializer(
             profiles, many=True,
-            context={'request': request, 'subject_id': int(subject_id)}
+            context={
+                'request': request,
+                'subject_id': int(subject_id),
+                'subject_name': subject_name,
+                'available_user_ids': available_user_ids,
+            }
         )
+        cache.set(cache_key, serializer.data, timeout=60)  # 1 minute
         return Response(serializer.data)
 
 
@@ -144,6 +198,19 @@ class StudentBookTeacherView(APIView):
                 return Response({'error': 'Selected slots do not belong to this teacher.'}, status=400)
             if slot.date < dt_date.today():
                 return Response({'error': 'Cannot book slots in the past.'}, status=400)
+
+        # Check if any slot is already booked by another student
+        active_schedules = BookingSchedule.objects.filter(
+            booking__teacher=teacher,
+            booking__booking_status__in=['confirmed', 'completed'],
+            status='scheduled'
+        )
+        booked_times = set((s.date, s.start_time) for s in active_schedules)
+        for slot in slots:
+            if (slot.date, slot.start_time) in booked_times:
+                return Response({
+                    'error': f"Slot on {slot.date.strftime('%b %d')} at {slot.start_time.strftime('%I:%M %p')} is already booked by another student. Please select an available slot."
+                }, status=400)
 
         # Calculate derived fields
         slots.sort(key=lambda s: (s.date, s.start_time))
@@ -326,6 +393,185 @@ class DummyPaymentView(APIView):
                 email_type=email_type, status='failed',
                 error_message=str(e), related_booking=booking,
             )
+
+
+class CreateRazorpayOrderView(APIView):
+    """Creates an official Razorpay order for a pending booking."""
+    permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
+
+    def post(self, request):
+        booking_id = request.data.get('booking_id')
+        if not booking_id:
+            return Response({'error': 'booking_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            booking = Booking.objects.get(pk=booking_id, student=request.user, booking_status='pending')
+        except Booking.DoesNotExist:
+            return Response({'error': 'Pending booking not found or already confirmed.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+            return Response({'error': 'Razorpay gateway is not configured on the server.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        client = get_razorpay_client()
+        amount_in_paise = int(booking.total_amount * 100)
+
+        order_params = {
+            'amount': amount_in_paise,
+            'currency': 'INR',
+            'receipt': f"bk_{booking.id}",
+            'notes': {
+                'booking_id': str(booking.id),
+                'student_id': str(request.user.id),
+                'student_email': request.user.email,
+                'subject': booking.subject.name,
+            }
+        }
+
+        try:
+            razorpay_order = client.order.create(data=order_params)
+
+            # Save order ID on booking
+            booking.razorpay_order_id = razorpay_order['id']
+            booking.save(update_fields=['razorpay_order_id'])
+
+            # Log transaction attempt
+            PaymentTransaction.objects.create(
+                booking=booking,
+                user=request.user,
+                razorpay_order_id=razorpay_order['id'],
+                amount=booking.total_amount,
+                currency='INR',
+                status='created',
+                raw_response=razorpay_order
+            )
+
+            return Response({
+                'order_id': razorpay_order['id'],
+                'amount': razorpay_order['amount'],
+                'currency': razorpay_order['currency'],
+                'key_id': settings.RAZORPAY_KEY_ID,
+                'booking_id': booking.id,
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Failed to create Razorpay order for booking {booking.id}: {e}", exc_info=True)
+            return Response({'error': f'Failed to create order: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class VerifyRazorpayPaymentView(APIView):
+    """Verifies HMAC signature from Razorpay checkout and confirms booking."""
+    permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
+
+    def post(self, request):
+        booking_id = request.data.get('booking_id')
+        razorpay_order_id = request.data.get('razorpay_order_id')
+        razorpay_payment_id = request.data.get('razorpay_payment_id')
+        razorpay_signature = request.data.get('razorpay_signature')
+
+        if not all([booking_id, razorpay_order_id, razorpay_payment_id, razorpay_signature]):
+            return Response({'error': 'Missing required payment verification parameters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            booking = Booking.objects.get(pk=booking_id, student=request.user)
+        except Booking.DoesNotExist:
+            return Response({'error': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        client = get_razorpay_client()
+        try:
+            client.utility.verify_payment_signature({
+                'razorpay_order_id': razorpay_order_id,
+                'razorpay_payment_id': razorpay_payment_id,
+                'razorpay_signature': razorpay_signature
+            })
+        except razorpay.errors.SignatureVerificationError:
+            logger.warning(f"Signature verification failed for order {razorpay_order_id}")
+            return Response({'error': 'Payment verification failed: Invalid signature.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Idempotent confirmation
+        booking, newly_confirmed = confirm_booking_payment(
+            booking_id=booking.id,
+            razorpay_order_id=razorpay_order_id,
+            razorpay_payment_id=razorpay_payment_id,
+            signature=razorpay_signature,
+            raw_data={'verified_via': 'client_callback'}
+        )
+
+        return Response({
+            'message': 'Payment successfully verified and booking confirmed.',
+            'booking_id': booking.id,
+            'status': 'confirmed'
+        }, status=status.HTTP_200_OK)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class RazorpayWebhookView(APIView):
+    """Public webhook endpoint to capture server-to-server Razorpay events."""
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        webhook_signature = request.headers.get('X-Razorpay-Signature')
+        if not webhook_signature:
+            return Response({'error': 'Missing signature header'}, status=status.HTTP_400_BAD_REQUEST)
+
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+        if not webhook_secret:
+            logger.error("RAZORPAY_WEBHOOK_SECRET is not configured.")
+            return Response({'error': 'Webhook secret unconfigured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        body = request.body
+        try:
+            client = get_razorpay_client()
+            client.utility.verify_webhook_signature(body.decode('utf-8'), webhook_signature, webhook_secret)
+        except razorpay.errors.SignatureVerificationError:
+            logger.warning("Invalid Razorpay webhook signature received.")
+            return Response({'error': 'Invalid signature'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error checking webhook signature: {e}")
+            return Response({'error': 'Verification error'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            event_data = json.loads(body.decode('utf-8'))
+        except Exception:
+            return Response({'error': 'Invalid JSON body'}, status=status.HTTP_400_BAD_REQUEST)
+
+        event_name = event_data.get('event')
+        logger.info(f"Received Razorpay webhook event: {event_name}")
+
+        if event_name in ['order.paid', 'payment.captured']:
+            payload = event_data.get('payload', {})
+            order_entity = payload.get('order', {}).get('entity', {})
+            payment_entity = payload.get('payment', {}).get('entity', {})
+
+            order_id = order_entity.get('id') or payment_entity.get('order_id')
+            payment_id = payment_entity.get('id')
+            booking_id = (
+                order_entity.get('notes', {}).get('booking_id') or
+                payment_entity.get('notes', {}).get('booking_id')
+            )
+
+            if booking_id:
+                try:
+                    confirm_booking_payment(
+                        booking_id=int(booking_id),
+                        razorpay_order_id=order_id,
+                        razorpay_payment_id=payment_id,
+                        raw_data=event_data
+                    )
+                except Exception as e:
+                    logger.error(f"Error in webhook confirming booking {booking_id}: {e}", exc_info=True)
+
+        elif event_name == 'payment.failed':
+            payment_entity = event_data.get('payload', {}).get('payment', {}).get('entity', {})
+            order_id = payment_entity.get('order_id')
+            if order_id:
+                PaymentTransaction.objects.filter(razorpay_order_id=order_id).update(
+                    status='failed',
+                    error_code=payment_entity.get('error_code', ''),
+                    error_description=payment_entity.get('error_description', ''),
+                    raw_response=event_data
+                )
+
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
 
 
 class StudentBookingsListView(generics.ListAPIView):
@@ -532,6 +778,138 @@ class CancelScheduleView(APIView):
             EmailLog.objects.create(
                 recipient_email=recipient.email, subject=subject_line,
                 email_type='class_cancelled', status='failed',
+                error_message=str(e), related_booking=booking,
+            )
+
+
+class StudentCancelBookingView(APIView):
+    """
+    Cancel an entire confirmed booking and issue an automated Razorpay refund.
+    Available to the student of the booking or platform staff.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
+
+    def post(self, request, pk):
+        reason = request.data.get('reason', '').strip() or 'Cancelled by student'
+
+        try:
+            booking = Booking.objects.select_related('student', 'teacher', 'subject', 'course').get(pk=pk)
+        except Booking.DoesNotExist:
+            return Response({'error': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        if user.id != booking.student_id and not (user.is_staff or user.is_superuser):
+            return Response({'error': 'You are not authorized to cancel this booking.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if booking.booking_status not in ['pending', 'confirmed']:
+            return Response({'error': f'Cannot cancel a booking that is already {booking.booking_status}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        refund_id = None
+        refund_amount = float(booking.total_amount)
+
+        # If payment was made via Razorpay, trigger the refund
+        if booking.payment_status in ['advance_paid', 'fully_paid'] and booking.razorpay_payment_id:
+            try:
+                client = get_razorpay_client()
+                amount_in_paise = int(booking.total_amount * 100)
+                refund_resp = client.payment.refund(booking.razorpay_payment_id, {
+                    'amount': amount_in_paise,
+                    'notes': {
+                        'booking_id': str(booking.id),
+                        'cancelled_by': user.email,
+                        'reason': reason,
+                    }
+                })
+                refund_id = refund_resp.get('id')
+
+                # Log refund transaction
+                PaymentTransaction.objects.create(
+                    booking=booking,
+                    user=user,
+                    razorpay_order_id=booking.razorpay_order_id or '',
+                    razorpay_payment_id=booking.razorpay_payment_id,
+                    amount=booking.total_amount,
+                    currency='INR',
+                    status='failed',
+                    error_description=f"Refund initiated: {refund_id}",
+                    raw_response=refund_resp
+                )
+            except Exception as e:
+                logger.error(f"Razorpay refund failed for booking {booking.id}: {e}", exc_info=True)
+                return Response({
+                    'error': f'Failed to process refund through payment gateway: {str(e)}. Please contact support.'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Update booking status
+        booking.booking_status = 'cancelled'
+        if refund_id:
+            booking.payment_status = 'refunded'
+        booking.save()
+
+        # Cancel all schedules
+        now = timezone.now()
+        booking.schedules.filter(status='scheduled').update(
+            status='cancelled',
+            cancel_reason=reason,
+            cancelled_by=user,
+            cancelled_at=now
+        )
+
+        # Cancel all linked sessions
+        for schedule in booking.schedules.all():
+            if schedule.class_session and schedule.class_session.status == 'Scheduled':
+                schedule.class_session.status = 'Cancelled'
+                schedule.class_session.cancel_reason = reason
+                schedule.class_session.cancelled_by = user
+                schedule.class_session.save()
+
+        # Send cancellation emails to both student and teacher
+        self._send_cancellation_emails(booking, reason, refund_amount if refund_id else 0)
+
+        return Response({
+            'message': 'Booking cancelled successfully. Refund has been initiated to your original payment method.',
+            'booking_id': booking.id,
+            'refund_id': refund_id,
+            'refund_amount': refund_amount if refund_id else 0,
+        }, status=status.HTTP_200_OK)
+
+    def _send_cancellation_emails(self, booking, reason, refund_amount):
+        student = booking.student
+        teacher = booking.teacher
+
+        student_subject = f"Booking Cancelled & Refund Initiated: {booking.subject.name}"
+        student_body = (
+            f"Hello {student.first_name or 'Student'},\n\n"
+            f"Your booking for {booking.subject.name} with {teacher.first_name} {teacher.last_name} has been cancelled.\n\n"
+            f"Reason: {reason}\n"
+            f"Refund Amount: ₹{refund_amount}\n"
+            f"Refund Status: Initiated via Razorpay (Usually takes 5-7 business days for bank processing, or instant for UPI).\n\n"
+            f"If you have any questions, feel free to contact us.\n\n"
+            f"Best regards,\nProduit Academy Team"
+        )
+        self._send_and_log(student.email, student_subject, student_body, 'booking_cancel_student', booking)
+
+        teacher_subject = f"Booking Cancelled: {booking.subject.name} - {student.first_name} {student.last_name}"
+        teacher_body = (
+            f"Hello {teacher.first_name or 'Teacher'},\n\n"
+            f"The booking for {booking.subject.name} with student {student.first_name} {student.last_name} has been cancelled.\n\n"
+            f"Reason: {reason}\n"
+            f"Your previously reserved time slots have now been freed up on your calendar for other students to book.\n\n"
+            f"Best regards,\nProduit Academy Team"
+        )
+        self._send_and_log(teacher.email, teacher_subject, teacher_body, 'booking_cancel_teacher', booking)
+
+    def _send_and_log(self, email, subject, body, email_type, booking):
+        try:
+            send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=False)
+            EmailLog.objects.create(
+                recipient_email=email, subject=subject,
+                email_type=email_type, status='sent', related_booking=booking,
+            )
+        except Exception as e:
+            EmailLog.objects.create(
+                recipient_email=email, subject=subject,
+                email_type=email_type, status='failed',
                 error_message=str(e), related_booking=booking,
             )
 

@@ -4,6 +4,7 @@ from datetime import timedelta, datetime, time as dt_time, date as dt_date
 import csv
 import io
 from django.core.mail import send_mail
+from django.core.cache import cache
 
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
@@ -412,7 +413,8 @@ class PublicCourseListView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = Course.objects.filter(is_active=True).annotate(
-            _student_count=Count('enrollments')
+            _student_count=Count('enrollments', distinct=True),
+            _subject_count=Count('subjects', filter=Q(subjects__is_active=True), distinct=True)
         ).order_by('name')
         search = self.request.query_params.get('search', '').strip()
         if search:
@@ -420,23 +422,44 @@ class PublicCourseListView(generics.ListAPIView):
         return qs
 
     def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
+        search = request.query_params.get('search', '').strip()
         page_size = int(request.query_params.get('page_size', 20))
         page_num = int(request.query_params.get('page', 1))
 
+        cache_key = f"public_courses_page_{page_num}_{page_size}" if not search else None
+        if cache_key:
+            cached_data = cache.get(cache_key)
+            if cached_data is not None:
+                return Response(cached_data)
+
+        queryset = self.filter_queryset(self.get_queryset())
         total = queryset.count()
         start = (page_num - 1) * page_size
         end = start + page_size
         page_data = queryset[start:end]
 
         serializer = self.get_serializer(page_data, many=True)
-        return Response({
+        resp_data = {
             'results': serializer.data,
             'count': total,
             'page': page_num,
             'page_size': page_size,
             'has_next': end < total,
-        })
+        }
+        if cache_key:
+            cache.set(cache_key, resp_data, timeout=300)
+        return Response(resp_data)
+
+
+class PublicCourseDetailView(generics.RetrieveAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = CourseSerializer
+
+    def get_queryset(self):
+        return Course.objects.filter(is_active=True).annotate(
+            _student_count=Count('enrollments', distinct=True),
+            _subject_count=Count('subjects', filter=Q(subjects__is_active=True), distinct=True)
+        )
 
 
 class AdminCourseListCreateView(generics.ListCreateAPIView):

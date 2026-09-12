@@ -204,6 +204,12 @@ class Booking(models.Model):
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
     booking_status = models.CharField(max_length=20, choices=BOOKING_STATUS_CHOICES, default='pending')
     google_meet_link = models.URLField(max_length=500, blank=True)
+
+    # Razorpay tracking
+    razorpay_order_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -258,3 +264,33 @@ class EmailLog(models.Model):
 
     def __str__(self):
         return f"{self.email_type} → {self.recipient_email} ({self.status})"
+
+
+class PaymentTransaction(models.Model):
+    """Audit log for all Razorpay payment attempts and webhook updates."""
+    STATUS_CHOICES = [
+        ('created', 'Created'),
+        ('captured', 'Captured'),
+        ('failed', 'Failed'),
+    ]
+
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='payment_transactions')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='classes_payment_transactions')
+    razorpay_order_id = models.CharField(max_length=100, db_index=True)
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, help_text="Amount in INR")
+    currency = models.CharField(max_length=10, default='INR')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='created')
+    error_code = models.CharField(max_length=100, blank=True, null=True)
+    error_description = models.TextField(blank=True, null=True)
+    raw_response = models.JSONField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.razorpay_order_id} - {self.status} (₹{self.amount})"
+

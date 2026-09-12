@@ -7,6 +7,7 @@ from .views import (
     SessionRosterView,
     BulkAttendanceView,
     PublicCourseListView,
+    PublicCourseDetailView,
     AdminCourseListCreateView,
     AdminCourseDetailView,
     AdminBulkEnrollView,
@@ -30,6 +31,10 @@ from .views_booking import (
     TeacherProfileDetailView,
     StudentBookTeacherView,
     DummyPaymentView,
+    CreateRazorpayOrderView,
+    VerifyRazorpayPaymentView,
+    RazorpayWebhookView,
+    StudentCancelBookingView,
     StudentBookingsListView,
     StudentPaymentHistoryView,
     TeacherProfileManageView,
@@ -50,6 +55,7 @@ urlpatterns = [
 
     # Public Data
     path('courses/', PublicCourseListView.as_view(), name='classes-public-courses'),
+    path('courses/<int:pk>/', PublicCourseDetailView.as_view(), name='classes-public-course-detail'),
     path('subjects/', SubjectListView.as_view(), name='classes-subjects'),
     path('teachers/', TeachersBySubjectView.as_view(), name='classes-teachers-by-subject'),
     path('teacher-profile/<int:pk>/', TeacherProfileDetailView.as_view(), name='classes-teacher-profile'),
@@ -75,7 +81,11 @@ urlpatterns = [
     # Student Booking & Payment
     path('student/book-teacher/', StudentBookTeacherView.as_view(), name='student-book-teacher'),
     path('student/pay/', DummyPaymentView.as_view(), name='student-dummy-payment'),
+    path('student/razorpay/create-order/', CreateRazorpayOrderView.as_view(), name='razorpay-create-order'),
+    path('student/razorpay/verify/', VerifyRazorpayPaymentView.as_view(), name='razorpay-verify'),
+    path('razorpay/webhook/', RazorpayWebhookView.as_view(), name='razorpay-webhook'),
     path('student/bookings/', StudentBookingsListView.as_view(), name='student-bookings'),
+    path('student/bookings/<int:pk>/cancel/', StudentCancelBookingView.as_view(), name='student-cancel-booking'),
     path('student/payments/', StudentPaymentHistoryView.as_view(), name='student-payments'),
 
     # Teacher Availability, Profile & Bookings

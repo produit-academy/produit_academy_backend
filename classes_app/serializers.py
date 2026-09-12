@@ -21,6 +21,8 @@ class CourseSerializer(serializers.ModelSerializer):
         return obj.enrollments.count()
 
     def get_subject_count(self, obj):
+        if hasattr(obj, '_subject_count'):
+            return obj._subject_count
         return obj.subjects.filter(is_active=True).count()
 
 
@@ -33,6 +35,8 @@ class SubjectSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'description', 'icon', 'course', 'course_name', 'teacher_count', 'is_active', 'created_at']
 
     def get_teacher_count(self, obj):
+        if hasattr(obj, '_teacher_count'):
+            return obj._teacher_count
         return obj.teachers.filter(is_approved=True).count()
 
 
@@ -261,7 +265,7 @@ class TeacherProfileCardSerializer(serializers.ModelSerializer):
         model = TeacherProfile
         fields = [
             'id', 'user_id', 'name', 'bio', 'qualification', 'experience',
-            'profile_picture_url', 'profile_picture_base64', 'subject_name', 'hourly_rate',
+            'profile_picture_url', 'subject_name', 'hourly_rate',
             'availability_status', 'google_meet_link',
         ]
 
@@ -277,13 +281,20 @@ class TeacherProfileCardSerializer(serializers.ModelSerializer):
         return None
 
     def get_subject_name(self, obj):
+        subject_name = self.context.get('subject_name')
+        if subject_name:
+            return subject_name
         subject_id = self.context.get('subject_id')
         if subject_id:
-            subject = obj.taught_subjects.filter(id=subject_id).first()
-            return subject.name if subject else None
+            for s in obj.taught_subjects.all():
+                if s.id == subject_id:
+                    return s.name
         return None
 
     def get_availability_status(self, obj):
+        available_user_ids = self.context.get('available_user_ids')
+        if available_user_ids is not None:
+            return 'Available' if obj.user_id in available_user_ids else 'Unavailable'
         from datetime import date as dt_date
         today = dt_date.today()
         has_slots = TeacherAvailability.objects.filter(
@@ -331,13 +342,14 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
 
     def get_availability_slots(self, obj):
         from datetime import date as dt_date
+        today = dt_date.today()
         # Get all future availability slots
-        slots = list(TeacherAvailability.objects.filter(teacher=obj.user, date__gte=dt_date.today()))
+        slots = list(TeacherAvailability.objects.filter(teacher=obj.user, date__gte=today))
         
-        # Get all future schedules that are part of confirmed/completed bookings
+        # Get all future schedules that are part of active/confirmed/completed bookings
         active_schedules = BookingSchedule.objects.filter(
             booking__teacher=obj.user,
-            date__gte=dt_date.today(),
+            date__gte=today,
             booking__booking_status__in=['confirmed', 'completed'],
             status='scheduled'
         )
@@ -345,13 +357,14 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
         # Build a set of (date, start_time) tuples that are already booked
         booked_times = set((s.date, s.start_time) for s in active_schedules)
         
-        # Filter out the booked slots
-        available_slots = [
-            s for s in slots 
-            if (s.date, s.start_time) not in booked_times
-        ]
+        # Return all slots with an explicit is_booked flag
+        slot_data = []
+        for s in slots:
+            data = TeacherAvailabilitySerializer(s).data
+            data['is_booked'] = (s.date, s.start_time) in booked_times
+            slot_data.append(data)
         
-        return TeacherAvailabilitySerializer(available_slots, many=True).data
+        return slot_data
 
     def get_taught_subject_names(self, obj):
         return list(obj.taught_subjects.filter(is_active=True).values('id', 'name', 'course__name'))

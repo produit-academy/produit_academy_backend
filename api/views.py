@@ -384,7 +384,7 @@ class StudentOTPRegisterView(APIView):
     """
     Student self-registration for classes platform.
     POST: { full_name, phone_number, email }
-    Creates user with unusable password, sends OTP email.
+    Creates unverified user directly in DB (no volatile in-memory cache), sends OTP email.
     """
     permission_classes = [permissions.AllowAny]
 
@@ -396,30 +396,74 @@ class StudentOTPRegisterView(APIView):
         if not all([full_name, phone_number, email]):
             return Response({'error': 'full_name, phone_number, and email are required.'}, status=400)
 
-        # Check if user already exists globally
-        if User.objects.filter(email=email).exists():
-            return Response({'error': 'An account with this email already exists. Please login instead.'}, status=400)
+        # Check existing user
+        existing_user = User.objects.filter(email=email).first()
+        if existing_user:
+            # GATE platform check: Never allow GATE accounts on Classes
+            if existing_user.platform == 'gate':
+                return Response({
+                    'error': 'This email is already registered on the GATE platform. GATE accounts cannot be used on Produit Classes. Please use a different email.'
+                }, status=400)
+            
+            # Classes platform check
+            if existing_user.platform == 'classes':
+                if existing_user.is_verified:
+                    return Response({'error': 'An account with this email already exists. Please login instead.'}, status=400)
+                else:
+                    # Incomplete signup: update fields and refresh OTP
+                    name_parts = full_name.split(' ', 1)
+                    existing_user.first_name = name_parts[0]
+                    existing_user.last_name = name_parts[1] if len(name_parts) > 1 else ''
+                    existing_user.phone_number = phone_number
+                    otp = str(random.randint(100000, 999999))
+                    if settings.DEBUG:
+                        print(f"\n[DEBUG] Refreshed Registration OTP for {email}: {otp}\n")
+                    existing_user.otp = otp
+                    existing_user.otp_expiry = timezone.now() + timedelta(minutes=10)
+                    existing_user.save()
+
+                    try:
+                        send_html_email(
+                            subject='Welcome to Produit Academy! Verify Your Email',
+                            recipient_email=email,
+                            username=existing_user.first_name,
+                            otp=otp,
+                            type='signup',
+                        )
+                    except Exception:
+                        pass
+
+                    return Response({
+                        'message': 'Registration initiated! Please check your email for the OTP.',
+                        'email': email,
+                    }, status=200)
 
         # Parse name
         name_parts = full_name.split(' ', 1)
         first_name = name_parts[0]
         last_name = name_parts[1] if len(name_parts) > 1 else ''
 
-        # Store in cache instead of creating user immediately
         otp = str(random.randint(100000, 999999))
         if settings.DEBUG:
             print(f"\n[DEBUG] Registration OTP for {email}: {otp}\n")
-        
-        cache.set(
-            f"register_otp_{email}",
-            {
-                'otp': otp,
-                'first_name': first_name,
-                'last_name': last_name,
-                'phone_number': phone_number,
-            },
-            timeout=600  # 10 minutes
+
+        # Create user directly in the database (unverified)
+        user = User.objects.create_user(
+            username=email,
+            email=email,
+            password=None,
+            first_name=first_name,
+            last_name=last_name,
+            phone_number=phone_number,
+            role='student',
+            platform='classes',
+            is_active=True,
+            is_verified=False,
         )
+        user.student_id = f"PROD-{random.randint(1000, 9999)}"
+        user.otp = otp
+        user.otp_expiry = timezone.now() + timedelta(minutes=10)
+        user.save()
 
         try:
             send_html_email(
@@ -429,7 +473,7 @@ class StudentOTPRegisterView(APIView):
                 otp=otp,
                 type='signup',
             )
-        except Exception as e:
+        except Exception:
             pass  # Log but don't fail registration
 
         return Response({
@@ -443,6 +487,7 @@ class StudentOTPLoginView(APIView):
     Student login via OTP for classes platform.
     POST: { email }
     Sends OTP to email, user verifies on next step.
+    Blocks GATE platform users.
     """
     permission_classes = [permissions.AllowAny]
 
@@ -451,10 +496,17 @@ class StudentOTPLoginView(APIView):
         if not email:
             return Response({'error': 'Email is required.'}, status=400)
 
+        # Explicitly check for GATE platform users and deny access
+        gate_user = User.objects.filter(email=email, platform='gate').first()
+        if gate_user:
+            return Response({
+                'error': 'This account is registered on the GATE platform. GATE accounts cannot log in to Produit Classes. Please use gate.produitacademy.com.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
         try:
-            user = User.objects.get(email=email, role='student')
+            user = User.objects.get(email=email, role='student', platform='classes')
         except User.DoesNotExist:
-            return Response({'error': 'No student account found with this email.'}, status=404)
+            return Response({'error': 'No Classes student account found with this email. Please register first.'}, status=404)
 
         # Account status check
         if not user.is_active or user.account_status in ['banned', 'hold']:
@@ -464,7 +516,7 @@ class StudentOTPLoginView(APIView):
                 msg = f"Your account has been suspended: {user.status_reason}" if user.status_reason else "Your account has been suspended. Please contact support."
             return Response({'error': msg}, status=status.HTTP_403_FORBIDDEN)
 
-        # Rate limit: prevent OTP spam
+        # Rate limit: prevent OTP spam (1 min cooldown)
         if user.otp_expiry and user.otp_expiry > timezone.now() - timedelta(minutes=9):
             time_left = user.otp_expiry - timezone.now()
             if time_left.total_seconds() > 540:  # Less than 1 min since last OTP
@@ -494,7 +546,7 @@ class StudentOTPLoginView(APIView):
 
 class VerifyOTPAndLoginView(APIView):
     """
-    Verify OTP and return JWT tokens directly.
+    Verify OTP and return JWT tokens directly for Classes students.
     POST: { email, otp }
     """
     permission_classes = [permissions.AllowAny]
@@ -508,55 +560,47 @@ class VerifyOTPAndLoginView(APIView):
 
         try:
             user = User.objects.get(email=email)
-            if not user.is_active or user.account_status in ['banned', 'hold']:
-                return Response({'error': 'Account is inactive or suspended. Please contact support.'}, status=status.HTTP_403_FORBIDDEN)
-            # Existing user login flow
-            if not user.otp or user.otp != otp:
-                return Response({'error': 'Invalid OTP.'}, status=400)
-            if user.otp_expiry and timezone.now() > user.otp_expiry:
-                return Response({'error': 'OTP has expired. Please request a new one.'}, status=400)
-            
-            # Mark verified and clear OTP
-            user.is_verified = True
-            user.otp = None
-            user.otp_expiry = None
-            user.save()
-            
         except User.DoesNotExist:
-            # Registration flow: check cache
-            cached_data = cache.get(f"register_otp_{email}")
-            if not cached_data:
-                return Response({'error': 'OTP has expired or user not found. Please register again.'}, status=404)
-                
-            if cached_data['otp'] != otp:
-                return Response({'error': 'Invalid OTP.'}, status=400)
-                
-            # OTP is valid, create the user now
-            user = User.objects.create(
-                username=email,
-                email=email,
-                first_name=cached_data['first_name'],
-                last_name=cached_data['last_name'],
-                phone_number=cached_data['phone_number'],
-                role='student',
-                platform='classes',
-                is_active=True,
-                is_verified=True,
-            )
-            user.set_unusable_password()
-            user.save()
-            cache.delete(f"register_otp_{email}")
+            return Response({'error': 'No account found with this email. Please register first.'}, status=404)
 
-        # Generate JWT tokens with custom claims (same as normal login)
-        from .serializers import MyTokenObtainPairSerializer
+        # Platform check: Block GATE accounts
+        if user.platform != 'classes':
+            return Response({
+                'error': 'Access denied. This account belongs to the GATE platform and cannot log in to Produit Classes.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Role check: Only students
+        if user.role != 'student':
+            return Response({
+                'error': 'This portal is for students only. Teachers and administrators must log in with email and password.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Account status check
+        if not user.is_active or user.account_status in ['banned', 'hold']:
+            return Response({'error': 'Account is inactive or suspended. Please contact support.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Verify OTP
+        if not user.otp or user.otp != otp:
+            return Response({'error': 'Invalid OTP. Please check the code and try again.'}, status=400)
+        if user.otp_expiry and timezone.now() > user.otp_expiry:
+            return Response({'error': 'OTP has expired. Please request a new one.'}, status=400)
+
+        # Mark verified and clear OTP
+        user.is_verified = True
+        user.otp = None
+        user.otp_expiry = None
+        user.save()
+
+        # Generate JWT tokens with custom claims
         refresh = MyTokenObtainPairSerializer.get_token(user)
         access_token_str = str(refresh.access_token)
 
         # Single Session Enforcement (STUDENTS ONLY)
-        if user.role == 'student' and not user.is_staff and not user.is_superuser:
-            from .models import Session
+        try:
             Session.objects.filter(user=user).delete()
             Session.objects.create(user=user, session_key=access_token_str)
+        except Exception as e:
+            print(f"Session tracking notice: {e}")
 
         return Response({
             'message': 'Login successful!',

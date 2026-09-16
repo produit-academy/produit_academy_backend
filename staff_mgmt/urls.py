@@ -2,8 +2,8 @@ from django.urls import path
 from .views import (
     SuperAdminUserListView, SuperAdminUserCreateView, SuperAdminUserDetailView,
     AvailableModulesView, DepartmentListCreateView, DepartmentDetailView,
-    StaffSignUpView, StaffProfileView, StaffMyModulesView,
-    StaffTaskListView, StaffTaskUpdateView, TaskCommentView,
+    StaffSignUpView, StaffProfileView, StaffChangePasswordView, StaffMyModulesView,
+    StaffTaskListView, StaffTaskUpdateView, StaffTaskSubmitCompletionView, TaskCommentView,
     StaffComplaintListView, StaffComplaintDetailView,
     StaffContactListView, StaffContactUpdateView,
     StaffJobApplicationListView, StaffJobApplicationUpdateView,
@@ -12,16 +12,18 @@ from .views import (
     OnboardStaffView, OnboardStaffDetailView, ApproveStaffView, RevokeStaffView,
     StaffWalletView,
     ManagerStaffListView, ManagerTaskCreateView, ManagerTaskListView,
-    ManagerTaskDetailView, ManagerCommentView, MarkTaskPaidView,
+    ManagerTaskDetailView, ManagerCommentView, ManagerTaskReviewView,
+    ManagerTaskPostpaidPaymentView, MarkTaskPaidView,
     ManagerWalletListView, ManagerWalletDetailView, ManagerTransactionCreateView,
-    ManagerDirectPayView,
+    ManagerDirectPayView, SuperAdminOmniDashboardView,
 )
 
 urlpatterns = [
-    # Super Admin: Cross-Platform User Management
+    # Super Admin: Cross-Platform User Management & Omni Command Center
     path('admin/users/', SuperAdminUserListView.as_view(), name='superadmin-user-list'),
     path('admin/users/create/', SuperAdminUserCreateView.as_view(), name='superadmin-user-create'),
     path('admin/users/<int:pk>/', SuperAdminUserDetailView.as_view(), name='superadmin-user-detail'),
+    path('admin/omni-dashboard/', SuperAdminOmniDashboardView.as_view(), name='superadmin-omni-dashboard'),
 
     # Department Management
     path('admin/departments/', DepartmentListCreateView.as_view(), name='department-list-create'),
@@ -31,9 +33,11 @@ urlpatterns = [
     # Staff Self-Service
     path('staff/signup/', StaffSignUpView.as_view(), name='staff-signup'),
     path('staff/profile/', StaffProfileView.as_view(), name='staff-profile'),
+    path('staff/change-password/', StaffChangePasswordView.as_view(), name='staff-change-password'),
     path('staff/modules/', StaffMyModulesView.as_view(), name='staff-my-modules'),
     path('staff/tasks/', StaffTaskListView.as_view(), name='staff-tasks'),
     path('staff/tasks/<int:pk>/update/', StaffTaskUpdateView.as_view(), name='staff-task-update'),
+    path('staff/tasks/<int:pk>/submit-completion/', StaffTaskSubmitCompletionView.as_view(), name='staff-task-submit-completion'),
     path('staff/tasks/<int:pk>/comments/', TaskCommentView.as_view(), name='task-comments'),
 
     # Staff Module Access: Support
@@ -68,6 +72,8 @@ urlpatterns = [
     path('staff/manager/tasks/', ManagerTaskListView.as_view(), name='manager-task-list'),
     path('staff/manager/tasks/<int:pk>/', ManagerTaskDetailView.as_view(), name='manager-task-detail'),
     path('staff/manager/tasks/<int:pk>/comments/', ManagerCommentView.as_view(), name='manager-task-comments'),
+    path('staff/manager/tasks/<int:pk>/review/', ManagerTaskReviewView.as_view(), name='manager-task-review'),
+    path('staff/manager/tasks/<int:pk>/payment/', ManagerTaskPostpaidPaymentView.as_view(), name='manager-task-payment'),
     path('staff/manager/tasks/<int:pk>/pay/', MarkTaskPaidView.as_view(), name='mark-task-paid'),
     path('staff/manager/wallets/', ManagerWalletListView.as_view(), name='manager-wallet-list'),
     path('staff/manager/wallets/<int:pk>/', ManagerWalletDetailView.as_view(), name='manager-wallet-detail'),

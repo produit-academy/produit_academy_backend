@@ -38,6 +38,24 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
     elif type == 'staff_credentials':
         title = "Your Account is Ready!"
         intro = "Your account has been approved and is ready to use. Below are your login credentials."
+    elif type == 'user_credentials':
+        title = kwargs.get('title', "Your Produit Academy Account Details")
+        intro = "An account has been created for you by an administrator. Here are your login credentials:"
+    elif type == 'task_assigned':
+        title = "New Task Assigned"
+        intro = f"You have been assigned a new task: {kwargs.get('task_title', '')}"
+    elif type == 'task_review_update':
+        title = f"Task Update: {kwargs.get('task_title', '')}"
+        intro = f"Your task review status has been updated to: {kwargs.get('task_status', '')}"
+    elif type == 'class_scheduled':
+        title = f"Class Scheduled: {kwargs.get('class_title', 'Tuition Session')}"
+        intro = f"A class session has been scheduled for {kwargs.get('class_time', 'the upcoming slot')}."
+    elif type == 'class_reminder':
+        title = f"Reminder: Class Starts Soon ({kwargs.get('class_title', '')})"
+        intro = f"Your scheduled class is starting soon at {kwargs.get('class_time', '')}."
+    elif type == 'payment_confirmed':
+        title = "Payment Confirmation - Produit Academy"
+        intro = f"Thank you for your payment. Your booking has been successfully confirmed!"
     elif type == 'demo_alert':
         title = "Action Required: Demo Link Needed"
         intro = f"You have a new Demo Class scheduled with {kwargs.get('student_name', 'a student')}. Please log in and provide a meeting link."
@@ -103,24 +121,112 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
                     </div>
                     <p>Please log in 5 minutes early.</p>
         """
-
-    elif type == 'staff_credentials':
+    elif type in ['staff_credentials', 'user_credentials']:
         password = kwargs.get('password', '')
+        login_url = kwargs.get('login_url', 'https://classes.produitacademy.com/login')
+        platform_name = kwargs.get('platform_name', 'Produit Academy')
         message_body = f"""
                     <p>Hi <strong>{username}</strong>,</p>
                     <p>{intro}</p>
                     
-                    <div style="background-color: #f8fafc; border-left: 4px solid #0070f3; padding: 15px 20px; margin: 25px 0; border-radius: 0 8px 8px 0;">
-                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">Your Login Credentials</h3>
-                        <p style="margin: 8px 0; font-size: 14px;"><strong>Login URL:</strong> <a href="https://classes.produitacademy.com/login" style="color: #0070f3;">classes.produitacademy.com/login</a></p>
+                    <div style="background-color: #f8fafc; border-left: 4px solid #33ae78; padding: 18px 22px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">{platform_name} Credentials</h3>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Login URL:</strong> <a href="{login_url}" style="color: #33ae78;">{login_url}</a></p>
                         <p style="margin: 8px 0; font-size: 14px;"><strong>Email:</strong> {recipient_email}</p>
-                        <p style="margin: 8px 0; font-size: 14px;"><strong>Password:</strong> <code style="background: #e2e8f0; padding: 2px 8px; border-radius: 4px; font-size: 15px;">{password}</code></p>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>System Generated Password:</strong> <code style="background: #e2e8f0; padding: 4px 10px; border-radius: 4px; font-size: 15px; font-weight: 700; color: #1e293b;">{password}</code></p>
                     </div>
                     
-                    <p style="color: #666; font-size: 13px;">⚠️ Please change your password after your first login for security.</p>
+                    <p style="color: #666; font-size: 13px;">🔒 For security, you can change your password anytime in your account Profile.</p>
                     
                     <div style="text-align: center; margin: 30px 0;">
-                        <a href="https://classes.produitacademy.com/login" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Log In Now</a>
+                        <a href="{login_url}" style="background-color: #33ae78; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Log In Now</a>
+                    </div>
+        """
+    elif type == 'task_assigned':
+        task_title = kwargs.get('task_title', '')
+        task_desc = kwargs.get('task_description', '')
+        due_date = kwargs.get('due_date', 'Not specified')
+        assigned_by = kwargs.get('assigned_by_name', 'Your Manager')
+        portal_url = kwargs.get('portal_url', 'https://staff.produitacademy.com/tasks')
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>A new task has been assigned to you by <strong>{assigned_by}</strong>.</p>
+                    
+                    <div style="background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 18px 22px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">{task_title}</h3>
+                        <p style="margin: 8px 0; font-size: 14px; color: #4b5563;">{task_desc or 'No description provided.'}</p>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Due Date:</strong> {due_date}</p>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Status:</strong> Assigned (Postpaid payment upon completion & review)</p>
+                    </div>
+                    
+                    <p style="font-size: 14px; color: #555;">Please review the task requirements, track your progress, and submit your completion proof on the Staff Portal.</p>
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{portal_url}" style="background-color: #3b82f6; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">View Task in Portal</a>
+                    </div>
+        """
+    elif type == 'task_review_update':
+        task_title = kwargs.get('task_title', '')
+        task_status = kwargs.get('task_status', '')
+        feedback = kwargs.get('feedback', '')
+        portal_url = kwargs.get('portal_url', 'https://staff.produitacademy.com/tasks')
+        color = '#22c55e' if 'approved' in task_status.lower() or 'completed' in task_status.lower() else '#f59e0b'
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>Your task <strong>"{task_title}"</strong> review status has been updated:</p>
+                    
+                    <div style="background-color: #f8fafc; border-left: 4px solid {color}; padding: 18px 22px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">Status: {task_status.replace('_', ' ').title()}</h3>
+                        {f'<p style="margin: 8px 0; font-size: 14px;"><strong>Reviewer Feedback:</strong> {feedback}</p>' if feedback else ''}
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{portal_url}" style="background-color: {color}; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">View Task Details</a>
+                    </div>
+        """
+    elif type in ['class_scheduled', 'class_reminder']:
+        class_title = kwargs.get('class_title', 'Class Session')
+        class_time = kwargs.get('class_time', 'TBA')
+        meet_link = kwargs.get('meet_link')
+        partner_name = kwargs.get('partner_name', '')
+        role_label = kwargs.get('role_label', 'Student')
+        link_display = f'<a href="{meet_link}" style="background-color: #33ae78; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Join Google Meet</a>' if meet_link else '<span style="color: #64748b; font-style: italic;">Google Meet link will be provided by your admin before the session starts.</span>'
+        
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>{intro}</p>
+                    
+                    <div style="background-color: #f8fafc; border-left: 4px solid #33ae78; padding: 18px 22px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">{class_title}</h3>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Date & Time:</strong> {class_time}</p>
+                        {f'<p style="margin: 8px 0; font-size: 14px;"><strong>{role_label}:</strong> {partner_name}</p>' if partner_name else ''}
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Meeting Link:</strong></p>
+                        <div style="margin-top: 12px;">{link_display}</div>
+                    </div>
+                    
+                    <p style="font-size: 13px; color: #64748b;">Please log in 5 minutes early. Ensure your camera and microphone are working properly.</p>
+        """
+    elif type == 'payment_confirmed':
+        amount = kwargs.get('amount', '')
+        subject_name = kwargs.get('subject_name', '')
+        order_id = kwargs.get('order_id', '')
+        payment_id = kwargs.get('payment_id', '')
+        schedule_text = kwargs.get('schedule_text', '')
+        message_body = f"""
+                    <p>Hi <strong>{username}</strong>,</p>
+                    <p>{intro}</p>
+                    
+                    <div style="background-color: #f8fafc; border-left: 4px solid #33ae78; padding: 18px 22px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                        <h3 style="margin-top: 0; color: #111; font-size: 16px;">Payment Summary</h3>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Subject:</strong> {subject_name}</p>
+                        <p style="margin: 8px 0; font-size: 14px;"><strong>Amount Paid:</strong> ₹{amount}</p>
+                        {f'<p style="margin: 8px 0; font-size: 14px;"><strong>Razorpay Payment ID:</strong> {payment_id}</p>' if payment_id else ''}
+                        {f'<p style="margin: 8px 0; font-size: 14px;"><strong>Order ID:</strong> {order_id}</p>' if order_id else ''}
+                    </div>
+
+                    {f'<div style="margin: 20px 0;"><h4 style="margin-bottom: 8px;">Class Schedule:</h4><pre style="background: #f1f5f9; padding: 12px; border-radius: 6px; font-family: inherit; font-size: 13px;">{schedule_text}</pre></div>' if schedule_text else ''}
+
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="https://classes.produitacademy.com/student/dashboard" style="background-color: #33ae78; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Go to Dashboard</a>
                     </div>
         """
     else:

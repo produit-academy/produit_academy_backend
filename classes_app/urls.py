@@ -24,6 +24,10 @@ from .views import (
     BookSessionView, CompleteSessionView,
     ClassesProfileView, ClassesChangePasswordView,
     TeacherAvailabilityView, StudentTeacherSlotsView, CancelSessionView,
+    ClassSessionOutcomeView, ClassSessionMeetLinkView,
+    ClassReportListCreateView, ClassReportDetailView,
+    DailyVoiceNoteListCreateView,
+    TeacherMonthlyReportListCreateView, TeacherMonthlyReportDetailView,
 )
 from .views_booking import (
     SubjectListView,
@@ -45,6 +49,9 @@ from .views_booking import (
     AdminStudentActionView,
     AdminBookingsListView,
     AdminSubjectManageView,
+    AdminPaymentListView,
+    AdminPaymentRecheckView,
+    AdminPaymentReconcileView,
 )
 
 urlpatterns = [
@@ -77,6 +84,15 @@ urlpatterns = [
     path('student/demo/<int:pk>/reject/', RejectDemoView.as_view(), name='student-reject-demo'),
     path('student/book-session/', BookSessionView.as_view(), name='student-book-session'),
     path('teacher/session/<int:pk>/complete/', CompleteSessionView.as_view(), name='teacher-complete-session'),
+    path('sessions/<int:pk>/outcome/', ClassSessionOutcomeView.as_view(), name='classes-session-outcome'),
+    path('sessions/<int:pk>/meet-link/', ClassSessionMeetLinkView.as_view(), name='classes-session-meet-link'),
+
+    # Teacher Reporting, Voice Notes & Student Analysis
+    path('reports/', ClassReportListCreateView.as_view(), name='classes-reports-list-create'),
+    path('reports/<int:pk>/', ClassReportDetailView.as_view(), name='classes-reports-detail'),
+    path('voice-notes/', DailyVoiceNoteListCreateView.as_view(), name='classes-voice-notes'),
+    path('monthly-reports/', TeacherMonthlyReportListCreateView.as_view(), name='classes-monthly-reports'),
+    path('monthly-reports/<int:pk>/', TeacherMonthlyReportDetailView.as_view(), name='classes-monthly-report-detail'),
 
     # Student Booking & Payment
     path('student/book-teacher/', StudentBookTeacherView.as_view(), name='student-book-teacher'),
@@ -113,4 +129,7 @@ urlpatterns = [
     path('admin/analytics/user/<int:pk>/', AdminUserAnalyticsView.as_view(), name='admin-user-analytics'),
     path('admin/bookings/', AdminBookingsListView.as_view(), name='admin-bookings-list'),
     path('admin/subjects/', AdminSubjectManageView.as_view(), name='admin-subjects'),
+    path('admin/payments/', AdminPaymentListView.as_view(), name='admin-payments-list'),
+    path('admin/payments/<int:pk>/recheck/', AdminPaymentRecheckView.as_view(), name='admin-payment-recheck'),
+    path('admin/payments/<int:pk>/reconcile/', AdminPaymentReconcileView.as_view(), name='admin-payment-reconcile'),
 ]

@@ -88,8 +88,11 @@ class Enrollment(models.Model):
 class ClassSession(models.Model):
     STATUS_CHOICES = [
         ('Scheduled', 'Scheduled'),
+        ('Live', 'Live / Active'),
         ('Completed', 'Completed'),
+        ('Not Conducted', 'Not Conducted'),
         ('Cancelled', 'Cancelled'),
+        ('Needs Review', 'Expired / Needs Review'),
     ]
 
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='sessions')
@@ -111,6 +114,16 @@ class ClassSession(models.Model):
     teacher_notes = models.TextField(blank=True, null=True)
     cancel_reason = models.TextField(blank=True, null=True)
     cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_sessions')
+    
+    # Class outcome tracking
+    outcome_remarks = models.TextField(blank=True, default='')
+    outcome_marked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='marked_session_outcomes')
+    outcome_marked_at = models.DateTimeField(null=True, blank=True)
+
+    # Google Meet link audit
+    meet_link_added_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='added_meet_links')
+    meet_link_updated_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -223,8 +236,11 @@ class BookingSchedule(models.Model):
     """Individual class schedule entries generated after a booking is confirmed."""
     STATUS_CHOICES = [
         ('scheduled', 'Scheduled'),
+        ('live', 'Live / Active'),
         ('completed', 'Completed'),
+        ('not_conducted', 'Not Conducted'),
         ('cancelled', 'Cancelled'),
+        ('needs_review', 'Expired / Needs Review'),
     ]
 
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='schedules')
@@ -293,4 +309,124 @@ class PaymentTransaction(models.Model):
 
     def __str__(self):
         return f"{self.razorpay_order_id} - {self.status} (₹{self.amount})"
+
+
+class ClassReport(models.Model):
+    """Teacher class & student analysis report."""
+    REPORT_TYPE_CHOICES = [
+        ('individual', 'Individual Student'),
+        ('cohort', 'Class Cohort'),
+    ]
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('submitted', 'Submitted'),
+        ('reviewed', 'Reviewed'),
+        ('approved', 'Approved'),
+    ]
+
+    class_session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='reports', null=True, blank=True)
+    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='submitted_reports', limit_choices_to={'role': 'teacher'})
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='received_reports', null=True, blank=True, limit_choices_to={'role': 'student'})
+    report_type = models.CharField(max_length=20, choices=REPORT_TYPE_CHOICES, default='individual')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='submitted')
+
+    # Qualitative & Quantitative observations
+    performance_rating = models.PositiveSmallIntegerField(default=5, help_text="Rating out of 10")
+    attendance_observation = models.CharField(max_length=100, blank=True, default='Present')
+    homework_completion = models.CharField(
+        max_length=30,
+        choices=[
+            ('completed', 'Completed'),
+            ('partial', 'Partially Completed'),
+            ('not_done', 'Not Completed'),
+            ('not_assigned', 'Not Assigned'),
+        ],
+        default='completed'
+    )
+    strengths = models.TextField(blank=True, default='')
+    areas_for_improvement = models.TextField(blank=True, default='')
+    recommendations = models.TextField(blank=True, default='')
+    text_report = models.TextField(blank=True, default='')
+    
+    # Uploaded media
+    pdf_report = models.FileField(upload_to='reports/pdf/', blank=True, null=True)
+    voice_note = models.FileField(upload_to='reports/audio/', blank=True, null=True)
+    voice_note_duration = models.IntegerField(null=True, blank=True, help_text="Duration in seconds")
+
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_reports')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        target = self.student.username if self.student else "Cohort"
+        return f"Report by {self.teacher.username} for {target} ({self.created_at.strftime('%Y-%m-%d')})"
+
+
+class DailyClassVoiceNote(models.Model):
+    """Daily voice note recorded by a teacher for a class session."""
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('submitted', 'Submitted'),
+    ]
+
+    class_session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='voice_notes')
+    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='daily_voice_notes', limit_choices_to={'role': 'teacher'})
+    student = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='student_voice_notes', limit_choices_to={'role': 'student'})
+    date = models.DateField(auto_now_add=True)
+    audio_file = models.FileField(upload_to='voice_notes/')
+    text_summary = models.TextField(blank=True, default='')
+    duration_seconds = models.IntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='submitted')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Voice Note: {self.teacher.username} - {self.class_session.title} ({self.created_at.strftime('%Y-%m-%d')})"
+
+
+class TeacherMonthlyReport(models.Model):
+    """Monthly final report submitted by teachers with aggregate observations."""
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('submitted', 'Submitted'),
+        ('reviewed', 'Reviewed'),
+        ('approved', 'Approved'),
+    ]
+
+    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='monthly_reports', limit_choices_to={'role': 'teacher'})
+    month = models.PositiveSmallIntegerField(help_text="Month number 1-12")
+    year = models.PositiveSmallIntegerField(help_text="e.g. 2026")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='submitted')
+
+    # Aggregated metrics
+    classes_conducted_count = models.PositiveIntegerField(default=0)
+    classes_not_conducted_count = models.PositiveIntegerField(default=0)
+    total_teaching_hours = models.DecimalField(max_digits=7, decimal_places=2, default=0.00)
+    attendance_summary = models.JSONField(default=dict, blank=True, help_text="Summary breakdown of attendance")
+
+    # Detailed remarks
+    student_progress_notes = models.TextField(blank=True, default='')
+    tasks_assigned_completed = models.TextField(blank=True, default='')
+    important_observations = models.TextField(blank=True, default='')
+    voice_notes_count = models.PositiveIntegerField(default=0)
+    overall_remarks = models.TextField(blank=True, default='')
+    next_month_recommendations = models.TextField(blank=True, default='')
+    pdf_report_file = models.FileField(upload_to='monthly_reports/pdf/', blank=True, null=True)
+
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_monthly_reports')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-year', '-month']
+        unique_together = ('teacher', 'year', 'month')
+
+    def __str__(self):
+        return f"Monthly Report: {self.teacher.username} ({self.month}/{self.year}) - {self.status}"
 

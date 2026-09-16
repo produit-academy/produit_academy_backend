@@ -218,10 +218,26 @@ class StaffProfile(models.Model):
 
 class StaffTask(models.Model):
     STATUS_CHOICES = (
-        ('pending', 'Pending'),
+        ('assigned', 'Assigned'),
+        ('pending', 'Assigned'),  # backward compatibility alias
         ('in_progress', 'In Progress'),
+        ('submitted_for_review', 'Submitted for Review'),
+        ('approved', 'Approved'),
+        ('revision_required', 'Revision Required'),
         ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
     )
+
+    PAYMENT_STATUS_CHOICES = (
+        ('not_assigned', 'Not Yet Assigned'),
+        ('awaiting_review', 'Awaiting Review'),
+        ('amount_assigned', 'Amount Assigned'),
+        ('approved', 'Approved'),
+        ('paid', 'Paid'),
+        ('on_hold', 'On Hold'),
+        ('disputed', 'Disputed'),
+    )
+
     assigned_to = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -235,15 +251,73 @@ class StaffTask(models.Model):
     )
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='assigned')
     remarks = models.TextField(blank=True, null=True)
     due_date = models.DateField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(blank=True, null=True)
+
+    # Submission & Deliverable Proof
+    submission_report = models.TextField(blank=True, null=True)
+    submission_file = models.FileField(upload_to='task_submissions/', blank=True, null=True)
+    submission_image = models.FileField(upload_to='task_submissions/images/', blank=True, null=True)
+    time_spent_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0.00)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewer_feedback = models.TextField(blank=True, null=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_tasks')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    revision_count = models.PositiveIntegerField(default=0)
+
+    # Postpaid Payment Workflow
     payment_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    payment_status = models.CharField(max_length=30, choices=PAYMENT_STATUS_CHOICES, default='not_assigned')
+    payment_assigned_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_task_payments')
+    payment_assigned_at = models.DateTimeField(null=True, blank=True)
+    payment_approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_task_payments')
+    payment_approved_at = models.DateTimeField(null=True, blank=True)
+    payment_notes = models.TextField(blank=True, null=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
-        return f"{self.title} → {self.assigned_to.email} [{self.status}]"
+        return f"{self.title} → {self.assigned_to.email} [{self.status} / {self.payment_status}]"
+
+
+class TaskSubmissionHistory(models.Model):
+    """History of task completion submissions and review rounds."""
+    task = models.ForeignKey(StaffTask, on_delete=models.CASCADE, related_name='submission_history')
+    submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='task_submissions')
+    submission_report = models.TextField(blank=True, null=True)
+    submission_file = models.FileField(upload_to='task_submissions/', blank=True, null=True)
+    submission_image = models.FileField(upload_to='task_submissions/images/', blank=True, null=True)
+    time_spent_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0.00)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewer_feedback = models.TextField(blank=True, null=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_task_submissions')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-submitted_at']
+
+    def __str__(self):
+        return f"Submission on Task {self.task.id} by {self.submitted_by.email} ({self.submitted_at})"
+
+
+class TaskPaymentAuditLog(models.Model):
+    """Audit trail for postpaid task payment assignment and approvals."""
+    task = models.ForeignKey(StaffTask, on_delete=models.CASCADE, related_name='payment_audit_logs')
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    old_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    new_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    old_status = models.CharField(max_length=30)
+    new_status = models.CharField(max_length=30)
+    reason = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Audit on Task {self.task.id}: ₹{self.old_amount} -> ₹{self.new_amount} ({self.new_status})"
 
 
 class TaskComment(models.Model):

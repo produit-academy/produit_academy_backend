@@ -13,7 +13,10 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.exceptions import PermissionDenied
 
 from api.models import User
-from .models import Course, Enrollment, ClassSession, AttendanceRecord, TeacherAvailability
+from .models import (
+    Course, Enrollment, ClassSession, AttendanceRecord, TeacherAvailability,
+    ClassReport, DailyClassVoiceNote, TeacherMonthlyReport, Booking, BookingSchedule
+)
 from .serializers import (
     CourseSerializer, EnrollmentSerializer, ClassSessionSerializer,
     AttendanceRecordSerializer, BulkAttendanceSerializer,
@@ -23,6 +26,8 @@ from .serializers import (
     StaffCreateSerializer, BasicUserSerializer,
     StaffUpdateSerializer, UserUpdateSerializer,
     TeacherAvailabilitySerializer,
+    ClassReportSerializer, DailyClassVoiceNoteSerializer,
+    TeacherMonthlyReportSerializer,
 )
 
 
@@ -107,17 +112,21 @@ class StudentDashboardView(APIView):
 
         courses = Course.objects.filter(id__in=enrolled_course_ids, is_active=True)
 
-        # Upcoming classes: only sessions explicitly assigned to this student
+        # Upcoming and active classes: sessions assigned to this student
         upcoming = ClassSession.objects.filter(
             student=user,
-            scheduled_time__gte=now,
-            status='Scheduled'
-        ).distinct().order_by('scheduled_time')[:10]
+            status__in=['Scheduled', 'Live', 'Needs Review']
+        ).distinct().order_by('scheduled_time')[:15]
 
         # Completed demos awaiting student acceptance
         completed_demos = ClassSession.objects.filter(
             student=user, is_demo=True, status='Completed', demo_outcome='Pending'
         ).order_by('-scheduled_time')[:5]
+
+        # Published reports for this student
+        reports = ClassReport.objects.filter(
+            student=user, status__in=['submitted', 'approved']
+        ).select_related('teacher', 'class_session').order_by('-created_at')[:10]
 
         # Attendance stats
         records = AttendanceRecord.objects.filter(student=user)
@@ -146,6 +155,7 @@ class StudentDashboardView(APIView):
         data = {
             'upcoming_classes': ClassSessionSerializer(upcoming, many=True).data,
             'completed_demos': ClassSessionSerializer(completed_demos, many=True).data,
+            'recent_reports': ClassReportSerializer(reports, many=True).data,
             'total_classes': total,
             'present_count': present,
             'absent_count': absent,
@@ -191,12 +201,18 @@ class TeacherDashboardView(APIView):
             courses = Course.objects.none()
             assigned_subjects = []
 
-        # Upcoming scheduled classes
+        # Upcoming and active classes
         upcoming = ClassSession.objects.filter(
             teacher=user,
-            scheduled_time__gte=now,
-            status='Scheduled'
-        ).order_by('scheduled_time')[:10]
+            status__in=['Scheduled', 'Live']
+        ).order_by('scheduled_time')[:15]
+
+        # Classes whose scheduled end time has passed but outcome not confirmed
+        needs_review = ClassSession.objects.filter(
+            teacher=user,
+            status__in=['Scheduled', 'Needs Review'],
+            scheduled_time__lt=now - timedelta(minutes=60)
+        ).order_by('-scheduled_time')[:15]
 
         # Classes completed but attendance not yet submitted
         pending = ClassSession.objects.filter(
@@ -652,8 +668,10 @@ class AdminStatsView(APIView):
         ).count()
         att_rate = round(present_records / total_records * 100, 1) if total_records > 0 else 0
 
-        # Total bookings
+        # Revenue from confirmed bookings
         from .models import Booking
+        confirmed_bookings = Booking.objects.filter(payment_status__in=['advance_paid', 'fully_paid'])
+        total_revenue = confirmed_bookings.aggregate(total=Sum('advance_amount'))['total'] or 0
         total_bookings = Booking.objects.count()
 
         return Response({
@@ -664,6 +682,7 @@ class AdminStatsView(APIView):
             'active_students_today': active_today,
             'overall_attendance_rate': att_rate,
             'total_bookings': total_bookings,
+            'total_revenue': float(total_revenue),
         })
 
 
@@ -1135,6 +1154,7 @@ class BookSessionView(APIView):
 
 
 class CompleteSessionView(APIView):
+    """Backwards-compatible complete session view."""
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
 
     def patch(self, request, pk):
@@ -1143,10 +1163,328 @@ class CompleteSessionView(APIView):
             session = ClassSession.objects.get(pk=pk, teacher=request.user)
             session.status = 'Completed'
             session.teacher_notes = notes
+            session.outcome_marked_by = request.user
+            session.outcome_marked_at = timezone.now()
             session.save()
+            
+            # Sync schedule
+            BookingSchedule.objects.filter(class_session=session).update(status='completed')
             return Response({'message': 'Session marked as completed.'})
         except ClassSession.DoesNotExist:
             return Response({'error': 'Session not found'}, status=404)
+
+
+class ClassSessionOutcomeView(APIView):
+    """
+    Teacher or Admin marks the final outcome of a class session:
+    outcome: 'Completed' | 'Not Conducted' | 'Cancelled'
+    remarks: optional notes or reason why not conducted
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        outcome = request.data.get('outcome')
+        remarks = request.data.get('remarks', '').strip()
+        teacher_notes = request.data.get('teacher_notes', '').strip()
+
+        if outcome not in ['Completed', 'Not Conducted', 'Cancelled']:
+            return Response({'error': 'Outcome must be Completed, Not Conducted, or Cancelled.'}, status=400)
+
+        if outcome in ['Not Conducted', 'Cancelled'] and not remarks:
+            return Response({'error': f'Reason/remarks are required when marking as {outcome}.'}, status=400)
+
+        try:
+            if request.user.is_staff or request.user.is_superuser:
+                session = ClassSession.objects.get(pk=pk)
+            else:
+                session = ClassSession.objects.get(pk=pk, teacher=request.user)
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'Session not found or permission denied.'}, status=404)
+
+        # Update session
+        session.status = outcome
+        if remarks:
+            session.outcome_remarks = remarks
+        if teacher_notes:
+            session.teacher_notes = teacher_notes
+        session.outcome_marked_by = request.user
+        session.outcome_marked_at = timezone.now()
+        session.save()
+
+        # Synchronize BookingSchedule status
+        schedule_status_map = {
+            'Completed': 'completed',
+            'Not Conducted': 'not_conducted',
+            'Cancelled': 'cancelled'
+        }
+        BookingSchedule.objects.filter(class_session=session).update(
+            status=schedule_status_map.get(outcome, 'completed')
+        )
+
+        return Response({
+            'message': f'Class outcome successfully recorded as {outcome}.',
+            'session_id': session.id,
+            'status': session.status,
+            'outcome_remarks': session.outcome_remarks,
+        })
+
+
+class ClassSessionMeetLinkView(APIView):
+    """
+    Admin (or teacher) updates the Google Meet link for a scheduled class session.
+    Sends email notification to student & teacher.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, pk):
+        link = request.data.get('meeting_link', '').strip()
+        if not link:
+            return Response({'error': 'meeting_link is required.'}, status=400)
+
+        # Validate URL format
+        if not ('meet.google.com' in link or link.startswith('https://')):
+            return Response({'error': 'Please provide a valid Google Meet link (e.g. https://meet.google.com/abc-defg-hij).'}, status=400)
+
+        try:
+            if request.user.is_staff or request.user.is_superuser:
+                session = ClassSession.objects.select_related('student', 'teacher', 'course').get(pk=pk)
+            else:
+                session = ClassSession.objects.select_related('student', 'teacher', 'course').get(pk=pk, teacher=request.user)
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'Session not found or permission denied.'}, status=404)
+
+        session.meeting_link = link
+        session.meet_link_added_by = request.user
+        session.meet_link_updated_at = timezone.now()
+        session.save(update_fields=['meeting_link', 'meet_link_added_by', 'meet_link_updated_at'])
+
+        # Notify student via email
+        if session.student and session.student.email:
+            try:
+                class_time_str = session.scheduled_time.strftime('%A, %b %d, %Y at %I:%M %p')
+                send_html_email(
+                    f"Google Meet Link Added: {session.title}",
+                    session.student.email,
+                    session.student.first_name or session.student.username,
+                    type='class_scheduled',
+                    class_title=session.title,
+                    class_time=class_time_str,
+                    meet_link=link,
+                    partner_name=f"{session.teacher.first_name} {session.teacher.last_name}".strip(),
+                    role_label="Teacher"
+                )
+            except Exception as e:
+                pass
+
+        return Response({
+            'message': 'Google Meet link successfully updated and student notified.',
+            'meeting_link': session.meeting_link,
+            'updated_at': session.meet_link_updated_at.isoformat()
+        })
+
+
+# ============================================================
+# TEACHER STUDENT ANALYSIS & CLASS REPORTS
+# ============================================================
+
+class ClassReportListCreateView(APIView):
+    """List reports or submit a new report (text, PDF, audio voice note, evaluation)."""
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get(self, request):
+        user = request.user
+        if user.role == 'student':
+            reports = ClassReport.objects.filter(
+                student=user, status__in=['submitted', 'approved']
+            ).select_related('teacher', 'class_session').order_by('-created_at')
+        elif user.role == 'teacher':
+            reports = ClassReport.objects.filter(
+                teacher=user
+            ).select_related('student', 'class_session').order_by('-created_at')
+        else: # admin / manager
+            reports = ClassReport.objects.all().select_related(
+                'teacher', 'student', 'class_session'
+            ).order_by('-created_at')
+
+        # Filter by class_session
+        session_id = request.query_params.get('class_session')
+        if session_id:
+            reports = reports.filter(class_session_id=session_id)
+
+        serializer = ClassReportSerializer(reports, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        if not (request.user.role == 'teacher' or request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Only teachers and admins can submit reports.'}, status=403)
+
+        data = request.data.copy()
+        serializer = ClassReportSerializer(data=data)
+        if serializer.is_valid():
+            report = serializer.save(teacher=request.user)
+            if 'pdf_report' in request.FILES:
+                report.pdf_report = request.FILES['pdf_report']
+            if 'voice_note' in request.FILES:
+                report.voice_note = request.FILES['voice_note']
+            report.save()
+            return Response(ClassReportSerializer(report).data, status=201)
+        return Response(serializer.errors, status=400)
+
+
+class ClassReportDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update, review or approve a report."""
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ClassReportSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'student':
+            return ClassReport.objects.filter(student=user, status__in=['submitted', 'approved'])
+        elif user.role == 'teacher':
+            return ClassReport.objects.filter(teacher=user)
+        return ClassReport.objects.all()
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        if user.is_staff or user.is_superuser or user.role == 'manager':
+            # Manager/Admin review action
+            new_status = self.request.data.get('status')
+            if new_status in ['reviewed', 'approved']:
+                serializer.save(reviewed_by=user, reviewed_at=timezone.now())
+                return
+        serializer.save()
+
+
+class DailyVoiceNoteListCreateView(APIView):
+    """Upload and retrieve daily voice notes for class sessions."""
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get(self, request):
+        session_id = request.query_params.get('class_session')
+        if not session_id:
+            return Response({'error': 'class_session query parameter required'}, status=400)
+        
+        notes = DailyClassVoiceNote.objects.filter(class_session_id=session_id).select_related('teacher')
+        return Response(DailyClassVoiceNoteSerializer(notes, many=True).data)
+
+    def post(self, request):
+        if not (request.user.role == 'teacher' or request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Only teachers can upload voice notes.'}, status=403)
+
+        session_id = request.data.get('class_session')
+        audio_file = request.FILES.get('audio_file')
+        text_summary = request.data.get('text_summary', '')
+        duration_seconds = int(request.data.get('duration_seconds', 0))
+
+        if not session_id or not audio_file:
+            return Response({'error': 'class_session and audio_file are required.'}, status=400)
+
+        try:
+            session = ClassSession.objects.get(pk=session_id)
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'ClassSession not found.'}, status=404)
+
+        note = DailyClassVoiceNote.objects.create(
+            class_session=session,
+            teacher=request.user,
+            student=session.student,
+            audio_file=audio_file,
+            text_summary=text_summary,
+            duration_seconds=duration_seconds,
+            status='submitted'
+        )
+
+        return Response(DailyClassVoiceNoteSerializer(note).data, status=201)
+
+
+class TeacherMonthlyReportListCreateView(APIView):
+    """Teachers submit monthly summary reports; admins review them."""
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get(self, request):
+        user = request.user
+        if user.role == 'teacher':
+            reports = TeacherMonthlyReport.objects.filter(teacher=user).order_by('-year', '-month')
+        else:
+            reports = TeacherMonthlyReport.objects.all().select_related('teacher').order_by('-year', '-month')
+
+        # Filters
+        month = request.query_params.get('month')
+        year = request.query_params.get('year')
+        teacher_id = request.query_params.get('teacher_id')
+        if month:
+            reports = reports.filter(month=int(month))
+        if year:
+            reports = reports.filter(year=int(year))
+        if teacher_id and (user.is_staff or user.is_superuser):
+            reports = reports.filter(teacher_id=int(teacher_id))
+
+        return Response(TeacherMonthlyReportSerializer(reports, many=True).data)
+
+    def post(self, request):
+        if not (request.user.role == 'teacher' or request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Only teachers can submit monthly reports.'}, status=403)
+
+        month = int(request.data.get('month', timezone.now().month))
+        year = int(request.data.get('year', timezone.now().year))
+
+        report, created = TeacherMonthlyReport.objects.get_or_create(
+            teacher=request.user,
+            month=month,
+            year=year,
+            defaults={'status': 'draft'}
+        )
+
+        for field in ['student_progress_notes', 'tasks_assigned_completed', 'important_observations', 'overall_remarks', 'next_month_recommendations', 'status']:
+            if field in request.data:
+                setattr(report, field, request.data[field])
+
+        # Compute aggregates from ClassSessions
+        sessions = ClassSession.objects.filter(
+            teacher=request.user,
+            scheduled_time__year=year,
+            scheduled_time__month=month
+        )
+        report.classes_conducted_count = sessions.filter(status='Completed').count()
+        report.classes_not_conducted_count = sessions.filter(status='Not Conducted').count()
+        total_mins = sessions.filter(status='Completed').aggregate(total=Sum('duration_minutes'))['total'] or 0
+        report.total_teaching_hours = round(total_mins / 60, 2)
+        report.voice_notes_count = DailyClassVoiceNote.objects.filter(
+            teacher=request.user,
+            date__year=year,
+            date__month=month
+        ).count()
+
+        if 'pdf_report_file' in request.FILES:
+            report.pdf_report_file = request.FILES['pdf_report_file']
+
+        report.save()
+        return Response(TeacherMonthlyReportSerializer(report).data, status=201 if created else 200)
+
+
+class TeacherMonthlyReportDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = TeacherMonthlyReportSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'teacher':
+            return TeacherMonthlyReport.objects.filter(teacher=user)
+        return TeacherMonthlyReport.objects.all()
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        if user.is_staff or user.is_superuser or user.role == 'manager':
+            new_status = self.request.data.get('status')
+            if new_status in ['reviewed', 'approved']:
+                serializer.save(reviewed_by=user, reviewed_at=timezone.now())
+                return
+        serializer.save()
 
 
 # ============================================================

@@ -1,9 +1,12 @@
+from datetime import timedelta
+from django.utils import timezone
 from rest_framework import serializers
 from api.models import User
 from .models import (
     Course, Subject, Enrollment, ClassSession, AttendanceRecord,
     TeacherAvailability, TeacherProfile, TeacherDemoVideo,
     Booking, BookingSchedule, EmailLog,
+    ClassReport, DailyClassVoiceNote, TeacherMonthlyReport,
 )
 
 
@@ -65,17 +68,23 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     student_name = serializers.SerializerMethodField()
     attendance_submitted = serializers.SerializerMethodField()
     cancelled_by_name = serializers.SerializerMethodField()
+    effective_status = serializers.SerializerMethodField()
+    has_meet_link = serializers.SerializerMethodField()
+    outcome_marked_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = ClassSession
         fields = [
             'id', 'course', 'course_name', 'teacher', 'teacher_name',
             'title', 'meeting_link', 'scheduled_time', 'duration_minutes',
-            'status', 'attendance_submitted', 'created_at',
+            'status', 'effective_status', 'has_meet_link',
+            'attendance_submitted', 'created_at',
             'is_demo', 'student', 'student_name', 'teacher_notes',
-            'cancel_reason', 'cancelled_by', 'cancelled_by_name'
+            'cancel_reason', 'cancelled_by', 'cancelled_by_name',
+            'outcome_remarks', 'outcome_marked_by', 'outcome_marked_by_name', 'outcome_marked_at',
+            'meet_link_added_by', 'meet_link_updated_at'
         ]
-        read_only_fields = ['teacher', 'created_at']
+        read_only_fields = ['teacher', 'created_at', 'outcome_marked_at', 'meet_link_updated_at']
 
     def get_attendance_submitted(self, obj):
         return obj.attendance.exists()
@@ -88,6 +97,26 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     def get_cancelled_by_name(self, obj):
         if obj.cancelled_by:
             return f"{obj.cancelled_by.first_name} {obj.cancelled_by.last_name}".strip() or obj.cancelled_by.username
+        return None
+
+    def get_effective_status(self, obj):
+        now = timezone.now()
+        if obj.status in ['Completed', 'Not Conducted', 'Cancelled']:
+            return obj.status
+        
+        end_time = obj.scheduled_time + timedelta(minutes=obj.duration_minutes)
+        if obj.scheduled_time <= now <= end_time:
+            return 'Live'
+        elif now > end_time:
+            return 'Needs Review'
+        return obj.status
+
+    def get_has_meet_link(self, obj):
+        return bool(obj.meeting_link and obj.meeting_link.strip())
+
+    def get_outcome_marked_by_name(self, obj):
+        if obj.outcome_marked_by:
+            return f"{obj.outcome_marked_by.first_name} {obj.outcome_marked_by.last_name}".strip() or obj.outcome_marked_by.username
         return None
 
 
@@ -428,3 +457,84 @@ class EmailLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmailLog
         fields = ['id', 'recipient_email', 'subject', 'email_type', 'status', 'error_message', 'created_at']
+
+
+class ClassReportSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.SerializerMethodField()
+    student_name = serializers.SerializerMethodField()
+    session_title = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClassReport
+        fields = [
+            'id', 'class_session', 'session_title', 'teacher', 'teacher_name',
+            'student', 'student_name', 'report_type', 'status',
+            'performance_rating', 'attendance_observation', 'homework_completion',
+            'strengths', 'areas_for_improvement', 'recommendations', 'text_report',
+            'pdf_report', 'voice_note', 'voice_note_duration',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['teacher', 'created_at', 'updated_at', 'reviewed_at']
+
+    def get_teacher_name(self, obj):
+        return f"{obj.teacher.first_name} {obj.teacher.last_name}".strip() or obj.teacher.username
+
+    def get_student_name(self, obj):
+        if obj.student:
+            return f"{obj.student.first_name} {obj.student.last_name}".strip() or obj.student.username
+        return "Entire Class"
+
+    def get_session_title(self, obj):
+        return obj.class_session.title if obj.class_session else None
+
+    def get_reviewed_by_name(self, obj):
+        if obj.reviewed_by:
+            return f"{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}".strip() or obj.reviewed_by.username
+        return None
+
+
+class DailyClassVoiceNoteSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.SerializerMethodField()
+    session_title = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DailyClassVoiceNote
+        fields = [
+            'id', 'class_session', 'session_title', 'teacher', 'teacher_name',
+            'student', 'date', 'audio_file', 'text_summary', 'duration_seconds',
+            'status', 'created_at'
+        ]
+        read_only_fields = ['teacher', 'date', 'created_at']
+
+    def get_teacher_name(self, obj):
+        return f"{obj.teacher.first_name} {obj.teacher.last_name}".strip() or obj.teacher.username
+
+    def get_session_title(self, obj):
+        return obj.class_session.title
+
+
+class TeacherMonthlyReportSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TeacherMonthlyReport
+        fields = [
+            'id', 'teacher', 'teacher_name', 'month', 'year', 'status',
+            'classes_conducted_count', 'classes_not_conducted_count',
+            'total_teaching_hours', 'attendance_summary',
+            'student_progress_notes', 'tasks_assigned_completed',
+            'important_observations', 'voice_notes_count',
+            'overall_remarks', 'next_month_recommendations', 'pdf_report_file',
+            'submitted_at', 'reviewed_by', 'reviewed_by_name', 'reviewed_at'
+        ]
+        read_only_fields = ['teacher', 'submitted_at', 'reviewed_at']
+
+    def get_teacher_name(self, obj):
+        return f"{obj.teacher.first_name} {obj.teacher.last_name}".strip() or obj.teacher.username
+
+    def get_reviewed_by_name(self, obj):
+        if obj.reviewed_by:
+            return f"{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}".strip() or obj.reviewed_by.username
+        return None

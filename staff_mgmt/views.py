@@ -1,13 +1,19 @@
-from django.db import models as db_models
-from django.utils import timezone
+from rest_framework import generics, status
+from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, NotFound
-from rest_framework import generics, status
-from rest_framework.response import Response
-from rest_framework.views import APIView
-
-from api.models import User, Branch, Department, StaffProfile, StaffTask, TaskComment, Complaint, ContactInquiry, StaffWallet, WalletTransaction
-from classes_app.models import Course, TeacherProfile, Subject
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.utils import timezone
+from django.db import models as db_models
+from api.models import (
+    User, Branch, Department, StaffProfile, StaffTask, TaskComment,
+    Complaint, ContactInquiry, StaffWallet, WalletTransaction,
+    TaskSubmissionHistory, TaskPaymentAuditLog
+)
+from classes_app.models import Course, TeacherProfile, Subject, Booking, ClassSession
+from gate.models import MockTest, Question, StudyMaterial, CourseRequest
+from careers.models import JobApplication
 from api.views import send_html_email
 import random
 import string
@@ -19,6 +25,7 @@ from .serializers import (
     StaffTaskSerializer, TaskCommentSerializer,
     SuperAdminUserSerializer, StaffWalletSerializer,
     WalletTransactionSerializer, ManagerStaffSerializer,
+    TaskSubmissionHistorySerializer, TaskPaymentAuditLogSerializer,
 )
 from .permissions import HasModuleAccess
 
@@ -90,90 +97,110 @@ class SuperAdminUserCreateView(APIView):
         phone_number = request.data.get('phone_number', '')
         account_type = request.data.get('account_type', 'platform_admin')
 
-        if not email or not password:
-            return Response({'error': 'Email and password are required.'}, status=400)
+        if not email:
+            return Response({'error': 'Email is required.'}, status=400)
         if User.objects.filter(email=email).exists():
             return Response({'error': 'A user with this email already exists.'}, status=400)
+
+        # Auto-generate random secure password if not explicitly supplied
+        raw_password = password.strip() if password and str(password).strip() else ('PA-' + ''.join(random.choices(string.ascii_letters + string.digits, k=10)))
 
         valid_types = ['platform_admin', 'support_staff', 'contact_staff', 'hr_staff', 'manager', 'custom_staff']
         if account_type not in valid_types:
             return Response({'error': 'Invalid account type.'}, status=400)
 
+        login_url = 'https://staff.produitacademy.com/login'
+        platform_label = 'Staff Portal'
+
         if account_type == 'platform_admin':
-            # Create a platform admin
             platform = request.data.get('platform', 'gate')
             user = User.objects.create_user(
-                username=email, email=email, password=password,
+                username=email, email=email, password=raw_password,
                 first_name=first_name, last_name=last_name,
                 phone_number=phone_number, role='admin', platform=platform,
                 is_verified=True, is_staff=True,
             )
-            return Response({
-                'message': f'{platform.upper()} admin account created.',
-                'user_id': user.id, 'email': user.email,
-            }, status=201)
+            login_url = f'https://{platform}.produitacademy.com/login'
+            platform_label = f'{platform.upper()} Admin'
+            label = f'{platform.upper()} admin'
 
-        if account_type == 'manager':
+        elif account_type == 'manager':
             user = User.objects.create_user(
-                username=email, email=email, password=password,
+                username=email, email=email, password=raw_password,
                 first_name=first_name, last_name=last_name,
                 phone_number=phone_number, role='manager', is_verified=True,
             )
             StaffProfile.objects.create(user=user, designation='Manager')
-            return Response({
-                'message': 'Manager account created.',
-                'user_id': user.id, 'email': user.email,
-            }, status=201)
+            label = 'Manager'
 
-        # Staff accounts
-        user = User.objects.create_user(
-            username=email, email=email, password=password,
-            first_name=first_name, last_name=last_name,
-            phone_number=phone_number, role='staff', is_verified=True,
-        )
-
-        if account_type == 'support_staff':
-            platforms = request.data.get('assigned_platforms', ['gate'])
-            dept_name = f"Support - {', '.join([p.upper() for p in platforms])}"
-            dept, _ = Department.objects.get_or_create(
-                name=dept_name,
-                defaults={'allowed_modules': ['support'], 'description': f'Support staff for {dept_name}'}
+        else:
+            user = User.objects.create_user(
+                username=email, email=email, password=raw_password,
+                first_name=first_name, last_name=last_name,
+                phone_number=phone_number, role='staff', is_verified=True,
             )
-            StaffProfile.objects.create(user=user, department=dept, designation='Support Staff')
-            label = 'Support staff'
 
-        elif account_type == 'contact_staff':
-            platforms = request.data.get('assigned_platforms', ['gate'])
-            dept_name = f"Contact - {', '.join([p.upper() for p in platforms])}"
-            dept, _ = Department.objects.get_or_create(
-                name=dept_name,
-                defaults={'allowed_modules': ['support'], 'description': f'Contact enquiry staff for {dept_name}'}
-            )
-            StaffProfile.objects.create(user=user, department=dept, designation='Contact Enquiry Staff')
-            label = 'Contact enquiry staff'
+            if account_type == 'support_staff':
+                platforms = request.data.get('assigned_platforms', ['gate'])
+                dept_name = f"Support - {', '.join([p.upper() for p in platforms])}"
+                dept, _ = Department.objects.get_or_create(
+                    name=dept_name,
+                    defaults={'allowed_modules': ['support'], 'description': f'Support staff for {dept_name}'}
+                )
+                StaffProfile.objects.create(user=user, department=dept, designation='Support Staff')
+                label = 'Support staff'
 
-        elif account_type == 'hr_staff':
-            dept, _ = Department.objects.get_or_create(
-                name='HR - Careers',
-                defaults={'allowed_modules': ['careers', 'classes'], 'description': 'HR staff for job application reviews and onboarding'}
-            )
-            StaffProfile.objects.create(user=user, department=dept, designation='HR Staff')
-            label = 'HR staff'
+            elif account_type == 'contact_staff':
+                platforms = request.data.get('assigned_platforms', ['gate'])
+                dept_name = f"Contact - {', '.join([p.upper() for p in platforms])}"
+                dept, _ = Department.objects.get_or_create(
+                    name=dept_name,
+                    defaults={'allowed_modules': ['support'], 'description': f'Contact enquiry staff for {dept_name}'}
+                )
+                StaffProfile.objects.create(user=user, department=dept, designation='Contact Enquiry Staff')
+                label = 'Contact enquiry staff'
 
-        elif account_type == 'custom_staff':
-            dept_name = request.data.get('department_name', 'General')
-            designation = request.data.get('designation', 'Staff')
-            modules = request.data.get('modules', [])
-            dept, _ = Department.objects.get_or_create(
-                name=dept_name,
-                defaults={'allowed_modules': modules, 'description': f'Custom department: {dept_name}'}
+            elif account_type == 'hr_staff':
+                dept, _ = Department.objects.get_or_create(
+                    name='HR - Careers',
+                    defaults={'allowed_modules': ['careers', 'classes'], 'description': 'HR staff for job application reviews and onboarding'}
+                )
+                StaffProfile.objects.create(user=user, department=dept, designation='HR Staff')
+                label = 'HR staff'
+
+            elif account_type == 'custom_staff':
+                dept_name = request.data.get('department_name', 'General')
+                designation = request.data.get('designation', 'Staff')
+                modules = request.data.get('modules', [])
+                dept, _ = Department.objects.get_or_create(
+                    name=dept_name,
+                    defaults={'allowed_modules': modules, 'description': f'Custom department: {dept_name}'}
+                )
+                StaffProfile.objects.create(user=user, department=dept, designation=designation)
+                label = f'{designation}'
+
+        # Send welcome email with generated credentials
+        email_sent = False
+        try:
+            display_name = f"{first_name} {last_name}".strip() or email.split('@')[0]
+            send_html_email(
+                f"Your {platform_label} Account is Ready",
+                user.email,
+                display_name,
+                type='user_credentials',
+                password=raw_password,
+                login_url=login_url,
+                platform_name=platform_label
             )
-            StaffProfile.objects.create(user=user, department=dept, designation=designation)
-            label = f'{designation}'
+            email_sent = True
+        except Exception as e:
+            pass
 
         return Response({
-            'message': f'{label} account created.',
-            'user_id': user.id, 'email': user.email,
+            'message': f'{label} account created and login credentials emailed.',
+            'user_id': user.id,
+            'email': user.email,
+            'email_sent': email_sent
         }, status=201)
 
 
@@ -521,6 +548,34 @@ class StaffProfileView(generics.RetrieveUpdateAPIView):
         return Response(serializer.errors, status=400)
 
 
+class StaffChangePasswordView(APIView):
+    """Staff and managers can change their password from profile."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        current_password = request.data.get('current_password', '').strip()
+        new_password = request.data.get('new_password', '').strip()
+        confirm_password = request.data.get('confirm_password', '').strip()
+
+        if not current_password or not new_password:
+            return Response({'error': 'Current password and new password are required.'}, status=400)
+
+        if not user.check_password(current_password):
+            return Response({'error': 'Current password is incorrect.'}, status=400)
+
+        if len(new_password) < 6:
+            return Response({'error': 'New password must be at least 6 characters long.'}, status=400)
+
+        if confirm_password and new_password != confirm_password:
+            return Response({'error': 'New passwords do not match.'}, status=400)
+
+        user.set_password(new_password)
+        user.save()
+
+        return Response({'message': 'Password changed successfully.'})
+
+
 class StaffMyModulesView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -554,33 +609,65 @@ class StaffTaskListView(generics.ListAPIView):
 
 
 class StaffTaskUpdateView(generics.UpdateAPIView):
+    """Staff updates their assigned task status (e.g., in_progress)."""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffTaskSerializer
 
-    def get_object(self):
+    def get_queryset(self):
         user = self.request.user
         if user.role not in ['staff', 'manager']:
             raise PermissionDenied()
+        return StaffTask.objects.filter(assigned_to=user)
+
+
+class StaffTaskSubmitCompletionView(APIView):
+    """Staff submits task completion proof (text report, PDF file, image, time spent). Moves task to submitted_for_review."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request, pk):
+        user = request.user
         try:
-            return StaffTask.objects.get(pk=self.kwargs['pk'], assigned_to=user)
+            task = StaffTask.objects.get(pk=pk, assigned_to=user)
         except StaffTask.DoesNotExist:
-            raise NotFound()
+            return Response({'error': 'Task not found or not assigned to you.'}, status=404)
 
-    def patch(self, request, *args, **kwargs):
-        task = self.get_object()
-        data = {k: v for k, v in request.data.items() if k in ['status', 'remarks']}
-        if data.get('status') == 'completed' and task.status != 'completed':
-            data['completed_at'] = timezone.now()
-        elif data.get('status') == 'in_progress' and task.status == 'completed':
-            if task.payment.filter(type='credit').exists():
-                return Response({'error': 'Cannot revert a paid task.'}, status=400)
-            data['completed_at'] = None
+        report = request.data.get('submission_report', '').strip()
+        time_spent_raw = request.data.get('time_spent_hours', 0)
+        try:
+            time_spent = Decimal(str(time_spent_raw))
+        except Exception:
+            time_spent = Decimal('0.00')
 
-        serializer = StaffTaskSerializer(task, data=data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=400)
+        if not report and 'submission_file' not in request.FILES:
+            return Response({'error': 'Please provide a completion description or upload a proof document.'}, status=400)
+
+        task.submission_report = report
+        task.time_spent_hours = time_spent
+        task.submitted_at = timezone.now()
+        task.status = 'submitted_for_review'
+
+        if 'submission_file' in request.FILES:
+            task.submission_file = request.FILES['submission_file']
+        if 'submission_image' in request.FILES:
+            task.submission_image = request.FILES['submission_image']
+
+        task.save()
+
+        # Add to history
+        TaskSubmissionHistory.objects.create(
+            task=task,
+            submitted_by=user,
+            submission_report=report,
+            submission_file=task.submission_file,
+            submission_image=task.submission_image,
+            time_spent_hours=time_spent
+        )
+
+        return Response({
+            'message': 'Task submitted for review successfully.',
+            'task': StaffTaskSerializer(task).data
+        })
 
 
 class TaskCommentView(generics.ListCreateAPIView):
@@ -769,7 +856,25 @@ class AdminTaskCreateView(generics.CreateAPIView):
     def perform_create(self, serializer):
         if not is_admin(self.request.user):
             raise PermissionDenied()
-        serializer.save(assigned_by=self.request.user)
+        task = serializer.save(
+            assigned_by=self.request.user,
+            status='assigned',
+            payment_status='not_assigned'
+        )
+        try:
+            due_str = task.due_date.strftime('%b %d, %Y') if task.due_date else 'Flexible'
+            send_html_email(
+                f"New Task Assigned: {task.title}",
+                task.assigned_to.email,
+                task.assigned_to.first_name or task.assigned_to.username,
+                type='task_assigned',
+                task_title=task.title,
+                task_description=task.description or '',
+                due_date=due_str,
+                assigned_by_name=f"{self.request.user.first_name} {self.request.user.last_name}".strip() or self.request.user.email
+            )
+        except Exception:
+            pass
 
 
 class AdminTaskListView(generics.ListAPIView):
@@ -843,14 +948,32 @@ class ManagerStaffListView(generics.ListAPIView):
 
 
 class ManagerTaskCreateView(generics.CreateAPIView):
-    """Manager creates and assigns tasks."""
+    """Manager creates and assigns tasks (Postpaid model, no prepaid required)."""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffTaskSerializer
 
     def perform_create(self, serializer):
         if not is_admin_or_manager(self.request.user):
             raise PermissionDenied()
-        serializer.save(assigned_by=self.request.user)
+        task = serializer.save(
+            assigned_by=self.request.user,
+            status='assigned',
+            payment_status='not_assigned'
+        )
+        try:
+            due_str = task.due_date.strftime('%b %d, %Y') if task.due_date else 'Flexible'
+            send_html_email(
+                f"New Task Assigned: {task.title}",
+                task.assigned_to.email,
+                task.assigned_to.first_name or task.assigned_to.username,
+                type='task_assigned',
+                task_title=task.title,
+                task_description=task.description or '',
+                due_date=due_str,
+                assigned_by_name=f"{self.request.user.first_name} {self.request.user.last_name}".strip() or self.request.user.email
+            )
+        except Exception:
+            pass
 
 
 class ManagerTaskListView(generics.ListAPIView):
@@ -916,8 +1039,153 @@ class ManagerCommentView(generics.ListCreateAPIView):
         serializer.save(author=self.request.user, task=task)
 
 
+class ManagerTaskReviewView(APIView):
+    """Manager reviews submitted task: approve, request revision, or mark completed."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not is_admin_or_manager(request.user):
+            return Response({'error': 'Only managers and admins can review tasks.'}, status=403)
+        try:
+            task = StaffTask.objects.get(pk=pk)
+        except StaffTask.DoesNotExist:
+            return Response({'error': 'Task not found.'}, status=404)
+
+        action = request.data.get('action') # 'approve', 'request_revision', 'complete'
+        feedback = request.data.get('feedback', '').strip()
+
+        if action == 'request_revision':
+            if not feedback:
+                return Response({'error': 'Feedback is required when requesting revisions.'}, status=400)
+            task.status = 'revision_required'
+            task.reviewer_feedback = feedback
+            task.reviewed_by = request.user
+            task.reviewed_at = timezone.now()
+            task.revision_count += 1
+            task.save()
+
+            latest_hist = task.submission_history.first()
+            if latest_hist:
+                latest_hist.reviewer_feedback = feedback
+                latest_hist.reviewed_by = request.user
+                latest_hist.reviewed_at = timezone.now()
+                latest_hist.save()
+
+            try:
+                send_html_email(
+                    f"Revision Requested: {task.title}",
+                    task.assigned_to.email,
+                    task.assigned_to.first_name or task.assigned_to.username,
+                    type='task_review_update',
+                    task_title=task.title,
+                    task_status='revision_required',
+                    feedback=feedback
+                )
+            except Exception:
+                pass
+
+            return Response({'message': 'Task sent back for revision.', 'task': StaffTaskSerializer(task).data})
+
+        elif action == 'approve':
+            task.status = 'approved'
+            task.reviewed_by = request.user
+            task.reviewed_at = timezone.now()
+            if feedback:
+                task.reviewer_feedback = feedback
+            task.save()
+
+            try:
+                send_html_email(
+                    f"Task Deliverables Approved: {task.title}",
+                    task.assigned_to.email,
+                    task.assigned_to.first_name or task.assigned_to.username,
+                    type='task_review_update',
+                    task_title=task.title,
+                    task_status='approved',
+                    feedback=feedback or 'Great work! Your deliverables have been accepted.'
+                )
+            except Exception:
+                pass
+
+            return Response({'message': 'Task deliverables approved.', 'task': StaffTaskSerializer(task).data})
+
+        elif action == 'complete':
+            task.status = 'completed'
+            task.completed_at = timezone.now()
+            task.save()
+            return Response({'message': 'Task marked as completed.', 'task': StaffTaskSerializer(task).data})
+
+        return Response({'error': 'Invalid action. Choose approve, request_revision, or complete.'}, status=400)
+
+
+class ManagerTaskPostpaidPaymentView(APIView):
+    """Manager determines and approves postpaid payment amount after reviewing deliverables."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not is_admin_or_manager(request.user):
+            return Response({'error': 'Only managers and admins can set task payment.'}, status=403)
+        try:
+            task = StaffTask.objects.get(pk=pk)
+        except StaffTask.DoesNotExist:
+            return Response({'error': 'Task not found.'}, status=404)
+
+        if task.assigned_to == request.user and not request.user.is_superuser:
+            return Response({'error': 'Assignees cannot assign or approve their own payment.'}, status=403)
+
+        action = request.data.get('action') # 'assign_amount' or 'approve_payment'
+        amount_str = request.data.get('amount')
+        notes = request.data.get('notes', '').strip()
+
+        old_amount = task.payment_amount
+        old_status = task.payment_status
+
+        if action == 'assign_amount':
+            try:
+                amount = Decimal(str(amount_str))
+                if amount < 0:
+                    raise ValueError()
+            except Exception:
+                return Response({'error': 'Valid payment amount is required.'}, status=400)
+
+            task.payment_amount = amount
+            task.payment_status = 'amount_assigned'
+            task.payment_assigned_by = request.user
+            task.payment_assigned_at = timezone.now()
+            if notes:
+                task.payment_notes = notes
+            task.save()
+
+            TaskPaymentAuditLog.objects.create(
+                task=task, changed_by=request.user,
+                old_amount=old_amount, new_amount=amount,
+                old_status=old_status, new_status='amount_assigned',
+                reason=notes or 'Postpaid amount assigned by manager'
+            )
+            return Response({'message': f'Amount ₹{amount} assigned to task.', 'task': StaffTaskSerializer(task).data})
+
+        elif action == 'approve_payment':
+            if task.payment_amount <= 0:
+                return Response({'error': 'Cannot approve payment of ₹0. Please assign an amount first.'}, status=400)
+
+            task.payment_status = 'approved'
+            task.payment_approved_by = request.user
+            task.payment_approved_at = timezone.now()
+            task.save()
+
+            TaskPaymentAuditLog.objects.create(
+                task=task, changed_by=request.user,
+                old_amount=old_amount, new_amount=task.payment_amount,
+                old_status=old_status, new_status='approved',
+                reason=notes or 'Payment amount approved by manager'
+            )
+            return Response({'message': f'Payment of ₹{task.payment_amount} approved.', 'task': StaffTaskSerializer(task).data})
+
+        return Response({'error': 'Invalid action. Choose assign_amount or approve_payment.'}, status=400)
+
+
 class MarkTaskPaidView(APIView):
-    """Manager marks a task as paid → creates wallet transaction."""
+    """Manager marks a task as paid → creates credit transaction in staff wallet."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -929,8 +1197,8 @@ class MarkTaskPaidView(APIView):
         except StaffTask.DoesNotExist:
             return Response({'error': 'Task not found.'}, status=404)
 
-        if task.status != 'completed':
-            return Response({'error': 'Task must be completed before payment.'}, status=400)
+        if task.status != 'completed' and task.status != 'approved':
+            return Response({'error': 'Task must be approved or completed before payment.'}, status=400)
 
         amount = Decimal(str(request.data.get('amount', task.payment_amount)))
         if amount <= 0:
@@ -952,13 +1220,101 @@ class MarkTaskPaidView(APIView):
         wallet.total_earned += amount
         wallet.save()
 
-        # Update task payment amount if different
+        # Update task
         task.payment_amount = amount
+        task.payment_status = 'paid'
+        task.paid_at = timezone.now()
+        if task.status != 'completed':
+            task.status = 'completed'
+            task.completed_at = timezone.now()
         task.save()
 
         return Response({
             'message': f'₹{amount} credited to {task.assigned_to.email}',
             'wallet_balance': str(wallet.balance),
+            'task': StaffTaskSerializer(task).data
+        })
+
+
+class SuperAdminOmniDashboardView(APIView):
+    """Cross-platform command center for Super Admin giving complete visibility into all platforms."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_superuser:
+            raise PermissionDenied('Only super admins can view the Omni Dashboard.')
+
+        now = timezone.now()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        # 1. Classes Platform Data
+        classes_data = {
+            'total_courses': Course.objects.count(),
+            'active_courses': Course.objects.filter(is_active=True).count(),
+            'total_teachers': User.objects.filter(role='teacher', platform='classes').count(),
+            'approved_teachers': TeacherProfile.objects.filter(is_approved=True).count(),
+            'total_students': User.objects.filter(role='student', platform='classes').count(),
+            'total_bookings': Booking.objects.count(),
+            'confirmed_bookings': Booking.objects.filter(booking_status='confirmed').count(),
+            'total_revenue': float(Booking.objects.filter(payment_status__in=['advance_paid', 'fully_paid']).aggregate(total=db_models.Sum('advance_amount'))['total'] or 0),
+            'sessions_month': ClassSession.objects.filter(scheduled_time__gte=month_start).count(),
+            'live_or_needs_review': ClassSession.objects.filter(status__in=['Scheduled', 'Live', 'Needs Review']).count(),
+        }
+
+        # 2. GATE Platform Data
+        gate_data = {
+            'total_students': User.objects.filter(platform='gate', role='student').count(),
+            'total_materials': StudyMaterial.objects.count(),
+            'total_questions': Question.objects.count(),
+            'total_tests_taken': MockTest.objects.count(),
+            'pending_requests': CourseRequest.objects.filter(status='Pending').count(),
+        }
+
+        # 3. Staff & HR Operations Data
+        staff_data = {
+            'total_staff': User.objects.filter(role='staff').count(),
+            'total_managers': User.objects.filter(role='manager').count(),
+            'total_tasks': StaffTask.objects.count(),
+            'tasks_in_review': StaffTask.objects.filter(status='submitted_for_review').count(),
+            'tasks_completed': StaffTask.objects.filter(status='completed').count(),
+            'payments_awaiting_approval': StaffTask.objects.filter(payment_status__in=['awaiting_review', 'amount_assigned']).count(),
+            'total_payroll_earned': float(StaffWallet.objects.aggregate(total=db_models.Sum('total_earned'))['total'] or 0),
+            'total_payroll_paid': float(StaffWallet.objects.aggregate(total=db_models.Sum('total_paid'))['total'] or 0),
+        }
+
+        # 4. Support & Inquiries Data
+        support_data = {
+            'pending_complaints': Complaint.objects.filter(status='Pending').count(),
+            'resolved_complaints': Complaint.objects.filter(status='Resolved').count(),
+            'pending_inquiries': ContactInquiry.objects.filter(status='Pending').count(),
+            'resolved_inquiries': ContactInquiry.objects.filter(status='Resolved').count(),
+        }
+
+        # 5. Careers Data
+        careers_data = {
+            'total_applications': JobApplication.objects.count(),
+            'pending_applications': JobApplication.objects.filter(status='pending').count(),
+        }
+
+        # 6. Global User Counts
+        user_counts = {
+            'total_users': User.objects.count(),
+            'active_users': User.objects.filter(is_active=True).count(),
+            'students': User.objects.filter(role='student').count(),
+            'teachers': User.objects.filter(role='teacher').count(),
+            'staff': User.objects.filter(role='staff').count(),
+            'managers': User.objects.filter(role='manager').count(),
+            'admins': User.objects.filter(role='admin').count(),
+        }
+
+        return Response({
+            'classes': classes_data,
+            'gate': gate_data,
+            'staff': staff_data,
+            'support': support_data,
+            'careers': careers_data,
+            'users': user_counts,
+            'timestamp': now.isoformat()
         })
 
 

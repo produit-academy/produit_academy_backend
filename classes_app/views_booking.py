@@ -26,7 +26,7 @@ from .models import (
     TeacherDemoVideo, Booking, BookingSchedule, ClassSession,
     Enrollment, EmailLog, PLATFORM_FEE, PaymentTransaction,
 )
-from .services.payment_service import confirm_booking_payment
+from .services.payment_service import confirm_booking_payment, recheck_razorpay_payment, reconcile_payment
 
 logger = logging.getLogger(__name__)
 
@@ -549,6 +549,12 @@ class RazorpayWebhookView(APIView):
                 payment_entity.get('notes', {}).get('booking_id')
             )
 
+            # Fallback: find booking via PaymentTransaction if notes missing
+            if not booking_id and order_id:
+                tx = PaymentTransaction.objects.filter(razorpay_order_id=order_id).first()
+                if tx:
+                    booking_id = tx.booking_id
+
             if booking_id:
                 try:
                     confirm_booking_payment(
@@ -588,25 +594,134 @@ class StudentBookingsListView(generics.ListAPIView):
 
 
 class StudentPaymentHistoryView(APIView):
-    """Payment history for student."""
+    """Payment history for student with gateway reference details."""
     permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
 
     def get(self, request):
-        bookings = Booking.objects.filter(student=request.user).exclude(
-            booking_status='pending'
-        ).order_by('-created_at')
-        data = [{
-            'id': b.id,
-            'subject': b.subject.name,
-            'teacher': f"{b.teacher.first_name} {b.teacher.last_name}".strip(),
-            'total_amount': float(b.total_amount),
-            'advance_paid': float(b.advance_amount),
-            'remaining': float(b.remaining_amount),
-            'payment_status': b.payment_status,
-            'booking_status': b.booking_status,
-            'date': b.created_at.isoformat(),
-        } for b in bookings]
+        bookings = Booking.objects.filter(student=request.user).order_by('-created_at')
+        
+        # Load transactions
+        tx_map = {}
+        for tx in PaymentTransaction.objects.filter(user=request.user):
+            if tx.booking_id not in tx_map:
+                tx_map[tx.booking_id] = tx
+
+        data = []
+        for b in bookings:
+            tx = tx_map.get(b.id)
+            # Determine clear student-facing status
+            if b.payment_status in ['advance_paid', 'fully_paid']:
+                display_status = 'Paid'
+            elif tx and tx.status == 'failed':
+                display_status = 'Failed'
+            elif b.booking_status == 'cancelled':
+                display_status = 'Cancelled'
+            else:
+                display_status = 'Pending'
+
+            data.append({
+                'id': b.id,
+                'subject': b.subject.name,
+                'teacher': f"{b.teacher.first_name} {b.teacher.last_name}".strip() or b.teacher.username,
+                'total_amount': float(b.total_amount),
+                'advance_paid': float(b.advance_amount),
+                'remaining': float(b.remaining_amount),
+                'payment_status': b.payment_status,
+                'display_status': display_status,
+                'booking_status': b.booking_status,
+                'razorpay_order_id': b.razorpay_order_id or (tx.razorpay_order_id if tx else None),
+                'razorpay_payment_id': b.razorpay_payment_id or (tx.razorpay_payment_id if tx else None),
+                'date': b.created_at.isoformat(),
+            })
+
         return Response(data)
+
+
+# ============================================================
+# ADMIN PAYMENT AUDIT & RECONCILIATION
+# ============================================================
+
+class AdminPaymentListView(APIView):
+    """Admin views all payment transactions with filters and search."""
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        bookings = Booking.objects.all().select_related('student', 'teacher', 'subject', 'course').order_by('-created_at')
+        
+        # Filters
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            if status_filter == 'paid':
+                bookings = bookings.filter(payment_status__in=['advance_paid', 'fully_paid'])
+            elif status_filter == 'pending':
+                bookings = bookings.filter(payment_status='pending')
+            elif status_filter == 'cancelled':
+                bookings = bookings.filter(booking_status='cancelled')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            bookings = bookings.filter(
+                Q(student__email__icontains=search) |
+                Q(student__first_name__icontains=search) |
+                Q(teacher__first_name__icontains=search) |
+                Q(subject__name__icontains=search) |
+                Q(razorpay_order_id__icontains=search) |
+                Q(razorpay_payment_id__icontains=search)
+            )
+
+        tx_map = {}
+        for tx in PaymentTransaction.objects.filter(booking__in=bookings[:200]):
+            tx_map[tx.booking_id] = tx
+
+        data = []
+        for b in bookings[:100]:
+            tx = tx_map.get(b.id)
+            data.append({
+                'id': b.id,
+                'student_name': f"{b.student.first_name} {b.student.last_name}".strip() or b.student.username,
+                'student_email': b.student.email,
+                'teacher_name': f"{b.teacher.first_name} {b.teacher.last_name}".strip() or b.teacher.username,
+                'subject': b.subject.name,
+                'course': b.course.name,
+                'total_amount': float(b.total_amount),
+                'advance_amount': float(b.advance_amount),
+                'remaining_amount': float(b.remaining_amount),
+                'payment_status': b.payment_status,
+                'booking_status': b.booking_status,
+                'razorpay_order_id': b.razorpay_order_id or '',
+                'razorpay_payment_id': b.razorpay_payment_id or '',
+                'gateway_status': tx.status if tx else 'uninitiated',
+                'created_at': b.created_at.isoformat(),
+            })
+
+        return Response(data)
+
+
+class AdminPaymentRecheckView(APIView):
+    """Admin initiates Razorpay gateway sync to check and update order/payment status."""
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, pk):
+        result = recheck_razorpay_payment(pk)
+        if not result.get('success'):
+            return Response(result, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class AdminPaymentReconcileView(APIView):
+    """Admin manually reconciles a booking payment."""
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, pk):
+        reason = request.data.get('reason', '').strip()
+        action = request.data.get('action', 'mark_paid')
+        if not reason:
+            return Response({'error': 'Reason is required for manual reconciliation.'}, status=400)
+
+        result = reconcile_payment(pk, request.user, reason, action)
+        if not result.get('success'):
+            return Response(result, status=400)
+        return Response(result)
 
 
 # ============================================================

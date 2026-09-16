@@ -294,11 +294,6 @@ class SuperAdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
                 profile.designation = designation.strip()
             if modules is not None and isinstance(modules, list):
                 profile.assigned_modules = modules
-                if profile.department:
-                    cur = set(profile.department.allowed_modules or [])
-                    cur.update(modules)
-                    profile.department.allowed_modules = list(cur)
-                    profile.department.save(update_fields=['allowed_modules'])
             profile.save()
 
     def perform_destroy(self, instance):
@@ -675,10 +670,8 @@ class StaffMyModulesView(APIView):
             raise PermissionDenied('Only staff can access this.')
         try:
             profile = user.staff_profile
-            user_mods = set(profile.assigned_modules or [])
+            user_mods = set(profile.get_all_modules())
             dept = profile.department
-            if dept and dept.allowed_modules:
-                user_mods.update(dept.allowed_modules)
             accessible = [m for m in AVAILABLE_MODULES if m['key'] in user_mods]
             return Response({'department': DepartmentSerializer(dept).data if dept else None, 'modules': accessible})
         except StaffProfile.DoesNotExist:

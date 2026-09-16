@@ -215,11 +215,18 @@ class StaffProfile(models.Model):
         return f"Staff Profile - {self.user.email}"
 
     def has_module_access(self, module_key):
-        if module_key in (self.assigned_modules or []):
-            return True
+        if self.assigned_modules is not None and len(self.assigned_modules) > 0:
+            return module_key in self.assigned_modules
         if self.department and module_key in (self.department.allowed_modules or []):
             return True
         return False
+
+    def get_all_modules(self):
+        if self.assigned_modules is not None and len(self.assigned_modules) > 0:
+            return self.assigned_modules
+        if self.department and self.department.allowed_modules:
+            return self.department.allowed_modules
+        return []
 
 
 class StaffTask(models.Model):

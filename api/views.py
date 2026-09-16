@@ -321,10 +321,11 @@ class MyTokenObtainPairView(TokenObtainPairView):
                     if session_key:
                         Session.objects.create(user=user, session_key=str(session_key))
                 
-                if user.is_superuser or user.is_staff:
+                if user.is_superuser:
                     response.data['role'] = 'admin'
                 else:
-                    response.data['role'] = user.role 
+                    response.data['role'] = user.role
+                response.data['is_staff_user'] = hasattr(user, 'staff_profile') or user.role in ['staff', 'manager', 'admin'] or user.is_superuser or user.is_staff
             except Exception:
                 pass
         return response

@@ -39,10 +39,11 @@ class StaffProfileSerializer(serializers.ModelSerializer):
         return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.email
 
     def get_effective_modules(self, obj):
-        mods = set(obj.assigned_modules or [])
+        if obj.assigned_modules is not None:
+            return obj.assigned_modules
         if obj.department and obj.department.allowed_modules:
-            mods.update(obj.department.allowed_modules)
-        return list(mods)
+            return obj.department.allowed_modules
+        return []
 
 
 class TaskCommentSerializer(serializers.ModelSerializer):
@@ -203,10 +204,11 @@ class SuperAdminUserSerializer(serializers.ModelSerializer):
     def get_modules(self, obj):
         try:
             profile = obj.staff_profile
-            mods = set(profile.assigned_modules or [])
+            if profile.assigned_modules is not None:
+                return profile.assigned_modules
             if profile.department and profile.department.allowed_modules:
-                mods.update(profile.department.allowed_modules)
-            return list(mods)
+                return profile.department.allowed_modules
+            return []
         except Exception:
             return []
 
@@ -304,9 +306,10 @@ class ManagerStaffSerializer(serializers.ModelSerializer):
     def get_modules(self, obj):
         try:
             profile = obj.staff_profile
-            mods = set(profile.assigned_modules or [])
+            if profile.assigned_modules is not None:
+                return profile.assigned_modules
             if profile.department and profile.department.allowed_modules:
-                mods.update(profile.department.allowed_modules)
-            return list(mods)
+                return profile.department.allowed_modules
+            return []
         except Exception:
             return []

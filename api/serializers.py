@@ -12,13 +12,15 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['username'] = user.username
         token['first_name'] = user.first_name
         token['last_name'] = user.last_name
-        if user.is_superuser or user.is_staff:
+        if user.is_superuser:
             token['role'] = 'admin'
         else:
             token['role'] = user.role
         token['is_superuser'] = user.is_superuser
+        token['is_staff'] = user.is_staff
         token['profile_complete'] = bool(user.college and user.phone_number)
         token['platform'] = user.platform
+        token['is_staff_user'] = hasattr(user, 'staff_profile') or user.role in ['staff', 'manager', 'admin'] or user.is_superuser or user.is_staff
         return token
 
     def validate(self, attrs):

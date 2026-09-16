@@ -31,8 +31,8 @@ from .permissions import HasModuleAccess
 
 
 def is_admin(user):
-    """Check if user is an admin — either by role field or Django is_staff flag."""
-    return user.role == 'admin' or user.is_staff or user.is_superuser
+    """Check if user is an admin — superuser or role=='admin'."""
+    return user.is_superuser or user.role == 'admin'
 
 
 def is_manager(user):
@@ -43,6 +43,15 @@ def is_manager(user):
 def is_admin_or_manager(user):
     """Check if user is admin or manager."""
     return is_admin(user) or is_manager(user)
+
+
+def is_hr(user):
+    """Check if user has HR access — superuser, admin, manager, or staff with classes/careers module."""
+    if is_admin(user) or is_manager(user):
+        return True
+    if user.role == 'staff' and hasattr(user, 'staff_profile'):
+        return user.staff_profile.has_module_access('classes') or user.staff_profile.has_module_access('careers')
+    return False
 
 
 AVAILABLE_MODULES = [
@@ -390,8 +399,8 @@ class OnboardStaffView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not (is_admin(request.user) or request.user.role == 'staff'):
-            return Response({'error': 'Only HR and admins can view staff.'}, status=403)
+        if not is_hr(request.user):
+            return Response({'error': 'Only HR staff and admins can view staff.'}, status=403)
 
         staff = User.objects.filter(
             platform='classes', role__in=['teacher']
@@ -432,8 +441,8 @@ class OnboardStaffView(APIView):
         return Response(data)
 
     def post(self, request):
-        if not (is_admin(request.user) or request.user.role == 'staff'):
-            return Response({'error': 'Only HR and admins can onboard staff.'}, status=403)
+        if not is_hr(request.user):
+            return Response({'error': 'Only HR staff and admins can onboard staff.'}, status=403)
 
         email = request.data.get('email')
         role = request.data.get('role') # 'teacher'
@@ -501,7 +510,7 @@ class OnboardStaffDetailView(APIView):
             return None
 
     def patch(self, request, pk):
-        if not (is_admin(request.user) or request.user.role == 'staff'):
+        if not is_hr(request.user):
             return Response({'error': 'Permission denied.'}, status=403)
 
         user = self.get_staff_user(pk)
@@ -531,7 +540,7 @@ class OnboardStaffDetailView(APIView):
         return Response({'message': 'Staff details updated successfully.'})
 
     def delete(self, request, pk):
-        if not (is_admin(request.user) or request.user.role == 'staff'):
+        if not is_hr(request.user):
             return Response({'error': 'Permission denied.'}, status=403)
 
         user = self.get_staff_user(pk)
@@ -546,8 +555,8 @@ class ApproveStaffView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if not (is_admin(request.user) or request.user.role == 'staff'):
-            return Response({'error': 'Only HR and admins can approve staff.'}, status=403)
+        if not is_hr(request.user):
+            return Response({'error': 'Only HR staff and admins can approve staff.'}, status=403)
             
         user_id = request.data.get('user_id')
         try:
@@ -663,19 +672,20 @@ class StaffMyModulesView(APIView):
 
     def get(self, request):
         user = request.user
-        # Admins and managers see all modules
-        if is_admin(user) or is_manager(user):
+        if user.role == 'staff':
+            try:
+                profile = user.staff_profile
+                user_mods = set(profile.get_all_modules())
+                dept = profile.department
+                accessible = [m for m in AVAILABLE_MODULES if m['key'] in user_mods]
+                return Response({'department': DepartmentSerializer(dept).data if dept else None, 'modules': accessible})
+            except StaffProfile.DoesNotExist:
+                return Response({'department': None, 'modules': []})
+
+        if user.is_superuser or user.role in ['admin', 'manager']:
             return Response({'department': None, 'modules': AVAILABLE_MODULES})
-        if user.role != 'staff':
-            raise PermissionDenied('Only staff can access this.')
-        try:
-            profile = user.staff_profile
-            user_mods = set(profile.get_all_modules())
-            dept = profile.department
-            accessible = [m for m in AVAILABLE_MODULES if m['key'] in user_mods]
-            return Response({'department': DepartmentSerializer(dept).data if dept else None, 'modules': accessible})
-        except StaffProfile.DoesNotExist:
-            return Response({'department': None, 'modules': []})
+
+        return Response({'department': None, 'modules': []})
 
 
 class StaffTaskListView(generics.ListAPIView):

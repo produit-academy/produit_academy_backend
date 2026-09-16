@@ -68,7 +68,7 @@ class StudyMaterialView(generics.ListAPIView):
     serializer_class = StudyMaterialSerializer
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser or user.is_staff or user.role in ['admin', 'manager', 'staff'] or (hasattr(user, 'staff_profile') and user.staff_profile.has_module_access('gate_content')):
+        if user.is_superuser or user.role in ['admin', 'manager'] or (hasattr(user, 'staff_profile') and user.staff_profile.has_module_access('gate_content')):
             return StudyMaterial.objects.all()
         if not user.branch:
             return StudyMaterial.objects.none()

@@ -8,7 +8,7 @@ class HasModuleAccess(BasePermission):
     """
     def has_permission(self, request, view):
         user = request.user
-        if user.is_superuser or user.is_staff or user.role == 'admin':
+        if user.is_superuser or user.role == 'admin':
             return True
         if user.role != 'staff':
             return False

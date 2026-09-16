@@ -90,17 +90,31 @@ class SuperAdminUserCreateView(APIView):
         if not request.user.is_superuser:
             return Response({'error': 'Only super admins can create users.'}, status=403)
 
-        email = request.data.get('email')
+        email = request.data.get('email', '').strip()
         password = request.data.get('password')
-        first_name = request.data.get('first_name', '')
-        last_name = request.data.get('last_name', '')
-        phone_number = request.data.get('phone_number', '')
+        first_name = request.data.get('first_name', '').strip()
+        last_name = request.data.get('last_name', '').strip()
+        phone_number = request.data.get('phone_number', '').strip()
         account_type = request.data.get('account_type', 'platform_admin')
+        upgrade_existing = request.data.get('upgrade_existing', False)
 
         if not email:
             return Response({'error': 'Email is required.'}, status=400)
-        if User.objects.filter(email=email).exists():
-            return Response({'error': 'A user with this email already exists.'}, status=400)
+
+        existing_user = User.objects.filter(email=email).first()
+        if existing_user and not upgrade_existing:
+            return Response({
+                'error': f"A user with this email already exists ({existing_user.get_role_display()}).",
+                'user_exists': True,
+                'can_upgrade': True,
+                'existing_user': {
+                    'id': existing_user.id,
+                    'email': existing_user.email,
+                    'role': existing_user.role,
+                    'role_display': existing_user.get_role_display(),
+                    'name': f"{existing_user.first_name} {existing_user.last_name}".strip()
+                }
+            }, status=400)
 
         # Auto-generate random secure password if not explicitly supplied
         raw_password = password.strip() if password and str(password).strip() else ('PA-' + ''.join(random.choices(string.ascii_letters + string.digits, k=10)))
@@ -112,33 +126,49 @@ class SuperAdminUserCreateView(APIView):
         login_url = 'https://staff.produitacademy.com/login'
         platform_label = 'Staff Portal'
 
+        if existing_user:
+            user = existing_user
+            if first_name:
+                user.first_name = first_name
+            if last_name:
+                user.last_name = last_name
+            if phone_number:
+                user.phone_number = phone_number
+            user.set_password(raw_password)
+            user.is_verified = True
+            user.is_staff = True
+        else:
+            user = User(
+                username=email,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                phone_number=phone_number,
+                is_verified=True,
+                is_staff=True,
+            )
+            user.set_password(raw_password)
+
         if account_type == 'platform_admin':
             platform = request.data.get('platform', 'gate')
-            user = User.objects.create_user(
-                username=email, email=email, password=raw_password,
-                first_name=first_name, last_name=last_name,
-                phone_number=phone_number, role='admin', platform=platform,
-                is_verified=True, is_staff=True,
-            )
+            user.role = 'admin'
+            user.platform = platform
+            user.save()
             login_url = f'https://{platform}.produitacademy.com/login'
             platform_label = f'{platform.upper()} Admin'
             label = f'{platform.upper()} admin'
 
         elif account_type == 'manager':
-            user = User.objects.create_user(
-                username=email, email=email, password=raw_password,
-                first_name=first_name, last_name=last_name,
-                phone_number=phone_number, role='manager', is_verified=True,
-            )
-            StaffProfile.objects.create(user=user, designation='Manager')
+            user.role = 'manager'
+            user.save()
+            StaffProfile.objects.get_or_create(user=user, defaults={'designation': 'Manager'})
+            StaffWallet.objects.get_or_create(staff=user)
             label = 'Manager'
 
         else:
-            user = User.objects.create_user(
-                username=email, email=email, password=raw_password,
-                first_name=first_name, last_name=last_name,
-                phone_number=phone_number, role='staff', is_verified=True,
-            )
+            user.role = 'staff'
+            user.save()
+            StaffWallet.objects.get_or_create(staff=user)
 
             if account_type == 'support_staff':
                 platforms = request.data.get('assigned_platforms', ['gate'])
@@ -147,7 +177,14 @@ class SuperAdminUserCreateView(APIView):
                     name=dept_name,
                     defaults={'allowed_modules': ['support'], 'description': f'Support staff for {dept_name}'}
                 )
-                StaffProfile.objects.create(user=user, department=dept, designation='Support Staff')
+                if 'support' not in (dept.allowed_modules or []):
+                    dept.allowed_modules = list(set((dept.allowed_modules or []) + ['support']))
+                    dept.save(update_fields=['allowed_modules'])
+                profile, _ = StaffProfile.objects.get_or_create(user=user)
+                profile.department = dept
+                profile.designation = 'Support Staff'
+                profile.assigned_modules = ['support']
+                profile.save()
                 label = 'Support staff'
 
             elif account_type == 'contact_staff':
@@ -157,7 +194,14 @@ class SuperAdminUserCreateView(APIView):
                     name=dept_name,
                     defaults={'allowed_modules': ['support'], 'description': f'Contact enquiry staff for {dept_name}'}
                 )
-                StaffProfile.objects.create(user=user, department=dept, designation='Contact Enquiry Staff')
+                if 'support' not in (dept.allowed_modules or []):
+                    dept.allowed_modules = list(set((dept.allowed_modules or []) + ['support']))
+                    dept.save(update_fields=['allowed_modules'])
+                profile, _ = StaffProfile.objects.get_or_create(user=user)
+                profile.department = dept
+                profile.designation = 'Contact Enquiry Staff'
+                profile.assigned_modules = ['support']
+                profile.save()
                 label = 'Contact enquiry staff'
 
             elif account_type == 'hr_staff':
@@ -165,24 +209,37 @@ class SuperAdminUserCreateView(APIView):
                     name='HR - Careers',
                     defaults={'allowed_modules': ['careers', 'classes'], 'description': 'HR staff for job application reviews and onboarding'}
                 )
-                StaffProfile.objects.create(user=user, department=dept, designation='HR Staff')
+                profile, _ = StaffProfile.objects.get_or_create(user=user)
+                profile.department = dept
+                profile.designation = 'HR Staff'
+                profile.assigned_modules = ['careers', 'classes']
+                profile.save()
                 label = 'HR staff'
 
             elif account_type == 'custom_staff':
-                dept_name = request.data.get('department_name', 'General')
-                designation = request.data.get('designation', 'Staff')
+                dept_name = request.data.get('department_name', 'General').strip() or 'General'
+                designation = request.data.get('designation', 'Staff').strip() or 'Staff'
                 modules = request.data.get('modules', [])
-                dept, _ = Department.objects.get_or_create(
+                dept, created = Department.objects.get_or_create(
                     name=dept_name,
                     defaults={'allowed_modules': modules, 'description': f'Custom department: {dept_name}'}
                 )
-                StaffProfile.objects.create(user=user, department=dept, designation=designation)
+                if not created and modules:
+                    cur = set(dept.allowed_modules or [])
+                    cur.update(modules)
+                    dept.allowed_modules = list(cur)
+                    dept.save(update_fields=['allowed_modules'])
+                profile, _ = StaffProfile.objects.get_or_create(user=user)
+                profile.department = dept
+                profile.designation = designation
+                profile.assigned_modules = modules
+                profile.save()
                 label = f'{designation}'
 
         # Send welcome email with generated credentials
         email_sent = False
         try:
-            display_name = f"{first_name} {last_name}".strip() or email.split('@')[0]
+            display_name = f"{user.first_name} {user.last_name}".strip() or email.split('@')[0]
             send_html_email(
                 f"Your {platform_label} Account is Ready",
                 user.email,
@@ -193,15 +250,17 @@ class SuperAdminUserCreateView(APIView):
                 platform_name=platform_label
             )
             email_sent = True
-        except Exception as e:
+        except Exception:
             pass
 
+        action_word = 'upgraded' if existing_user else 'created'
         return Response({
-            'message': f'{label} account created and login credentials emailed.',
+            'message': f'{label} account {action_word} and login credentials emailed.',
             'user_id': user.id,
             'email': user.email,
-            'email_sent': email_sent
-        }, status=201)
+            'email_sent': email_sent,
+            'upgraded': bool(existing_user)
+        }, status=200 if existing_user else 201)
 
 
 class SuperAdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -215,6 +274,32 @@ class SuperAdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
             return User.objects.get(pk=self.kwargs['pk'])
         except User.DoesNotExist:
             raise NotFound('User not found.')
+
+    def perform_update(self, serializer):
+        user = serializer.save()
+        data = self.request.data
+        dept_id = data.get('department_id')
+        dept_name = data.get('department_name')
+        designation = data.get('designation')
+        modules = data.get('modules')
+
+        if dept_id or dept_name or designation is not None or modules is not None:
+            profile, _ = StaffProfile.objects.get_or_create(user=user)
+            if dept_id:
+                profile.department_id = dept_id
+            elif dept_name:
+                dept, _ = Department.objects.get_or_create(name=dept_name.strip())
+                profile.department = dept
+            if designation is not None:
+                profile.designation = designation.strip()
+            if modules is not None and isinstance(modules, list):
+                profile.assigned_modules = modules
+                if profile.department:
+                    cur = set(profile.department.allowed_modules or [])
+                    cur.update(modules)
+                    profile.department.allowed_modules = list(cur)
+                    profile.department.save(update_fields=['allowed_modules'])
+            profile.save()
 
     def perform_destroy(self, instance):
         if instance == self.request.user:
@@ -296,6 +381,7 @@ class StaffSignUpView(generics.CreateAPIView):
             except Department.DoesNotExist:
                 pass
         StaffProfile.objects.create(**profile_data)
+        StaffWallet.objects.get_or_create(staff=user)
 
         return Response({'message': 'Staff account created', 'user_id': user.id, 'email': user.email}, status=201)
 # ============================================================
@@ -486,6 +572,7 @@ class ApproveStaffView(APIView):
                     return Response({'error': 'Teacher already approved.'}, status=400)
                 profile.is_approved = True
                 profile.save()
+                StaffWallet.objects.get_or_create(staff=user)
             
             if is_newly_verified:
                 display_name = f"{user.first_name} {user.last_name}".strip() or user.email.split('@')[0]
@@ -588,11 +675,12 @@ class StaffMyModulesView(APIView):
             raise PermissionDenied('Only staff can access this.')
         try:
             profile = user.staff_profile
+            user_mods = set(profile.assigned_modules or [])
             dept = profile.department
-            if not dept:
-                return Response({'department': None, 'modules': []})
-            accessible = [m for m in AVAILABLE_MODULES if m['key'] in (dept.allowed_modules or [])]
-            return Response({'department': DepartmentSerializer(dept).data, 'modules': accessible})
+            if dept and dept.allowed_modules:
+                user_mods.update(dept.allowed_modules)
+            accessible = [m for m in AVAILABLE_MODULES if m['key'] in user_mods]
+            return Response({'department': DepartmentSerializer(dept).data if dept else None, 'modules': accessible})
         except StaffProfile.DoesNotExist:
             return Response({'department': None, 'modules': []})
 
@@ -1009,6 +1097,7 @@ class ManagerTaskDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         task = self.get_object()
+        old_assignee = task.assigned_to
         status = serializer.validated_data.get('status')
         if status == 'in_progress' and task.status == 'completed':
             if task.payment.filter(type='credit').exists():
@@ -1017,7 +1106,24 @@ class ManagerTaskDetailView(generics.RetrieveUpdateDestroyAPIView):
             serializer.validated_data['completed_at'] = None
         elif status == 'completed' and task.status != 'completed':
             serializer.validated_data['completed_at'] = timezone.now()
-        serializer.save()
+        updated_task = serializer.save()
+
+        # If assignee changed, notify the new staff member
+        if updated_task.assigned_to and updated_task.assigned_to != old_assignee:
+            try:
+                due_str = updated_task.due_date.strftime('%b %d, %Y') if updated_task.due_date else 'Flexible'
+                send_html_email(
+                    f"Task Assigned: {updated_task.title}",
+                    updated_task.assigned_to.email,
+                    updated_task.assigned_to.first_name or updated_task.assigned_to.username,
+                    type='task_assigned',
+                    task_title=updated_task.title,
+                    task_description=updated_task.description or '',
+                    due_date=due_str,
+                    assigned_by=f"{self.request.user.first_name} {self.request.user.last_name}".strip() or self.request.user.email,
+                )
+            except Exception:
+                pass
 
 
 class ManagerCommentView(generics.ListCreateAPIView):
@@ -1237,96 +1343,355 @@ class MarkTaskPaidView(APIView):
 
 
 class SuperAdminOmniDashboardView(APIView):
-    """Cross-platform command center for Super Admin giving complete visibility into all platforms."""
+    """Cross-platform command center giving complete real-time visibility and telemetry across all platforms."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not request.user.is_superuser:
-            raise PermissionDenied('Only super admins can view the Omni Dashboard.')
+        has_analytics = hasattr(request.user, 'staff_profile') and request.user.staff_profile.has_module_access('analytics')
+        if not (request.user.is_superuser or request.user.role == 'admin' or request.user.is_staff or has_analytics):
+            raise PermissionDenied('Only administrators and authorized staff can view the Omni Command Center.')
 
-        now = timezone.now()
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        t0 = timezone.now()
+        month_start = t0.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # 1. Classes Platform Data
-        classes_data = {
-            'total_courses': Course.objects.count(),
-            'active_courses': Course.objects.filter(is_active=True).count(),
-            'total_teachers': User.objects.filter(role='teacher', platform='classes').count(),
-            'approved_teachers': TeacherProfile.objects.filter(is_approved=True).count(),
-            'total_students': User.objects.filter(role='student', platform='classes').count(),
-            'total_bookings': Booking.objects.count(),
-            'confirmed_bookings': Booking.objects.filter(booking_status='confirmed').count(),
-            'total_revenue': float(Booking.objects.filter(payment_status__in=['advance_paid', 'fully_paid']).aggregate(total=db_models.Sum('advance_amount'))['total'] or 0),
-            'sessions_month': ClassSession.objects.filter(scheduled_time__gte=month_start).count(),
-            'live_or_needs_review': ClassSession.objects.filter(status__in=['Scheduled', 'Live', 'Needs Review']).count(),
+        subsystem_health = {
+            'database': 'operational',
+            'classes': 'operational',
+            'gate': 'operational',
+            'staff': 'operational',
+            'support': 'operational',
+            'careers': 'operational',
+            'users': 'operational',
         }
+        subsystem_errors = {}
 
-        # 2. GATE Platform Data
-        gate_data = {
-            'total_students': User.objects.filter(platform='gate', role='student').count(),
-            'total_materials': StudyMaterial.objects.count(),
-            'total_questions': Question.objects.count(),
-            'total_tests_taken': MockTest.objects.count(),
-            'pending_requests': CourseRequest.objects.filter(status='Pending').count(),
-        }
+        # 1. Classes Platform Telemetry
+        classes_data = {}
+        try:
+            total_courses = Course.objects.count()
+            active_courses = Course.objects.filter(is_active=True).count()
+            total_teachers = User.objects.filter(role='teacher').count()
+            approved_teachers = TeacherProfile.objects.filter(is_approved=True).count()
+            pending_teachers = max(0, total_teachers - approved_teachers)
+            total_students = User.objects.filter(role='student', platform='classes').count()
+            total_bookings = Booking.objects.count()
+            confirmed_bookings = Booking.objects.filter(booking_status='confirmed').count()
 
-        # 3. Staff & HR Operations Data
-        staff_data = {
-            'total_staff': User.objects.filter(role='staff').count(),
-            'total_managers': User.objects.filter(role='manager').count(),
-            'total_tasks': StaffTask.objects.count(),
-            'tasks_in_review': StaffTask.objects.filter(status='submitted_for_review').count(),
-            'tasks_completed': StaffTask.objects.filter(status='completed').count(),
-            'payments_awaiting_approval': StaffTask.objects.filter(payment_status__in=['awaiting_review', 'amount_assigned']).count(),
-            'total_payroll_earned': float(StaffWallet.objects.aggregate(total=db_models.Sum('total_earned'))['total'] or 0),
-            'total_payroll_paid': float(StaffWallet.objects.aggregate(total=db_models.Sum('total_paid'))['total'] or 0),
-        }
+            revenue_agg = Booking.objects.filter(payment_status__in=['advance_paid', 'fully_paid']).aggregate(
+                total=db_models.Sum('advance_amount')
+            )['total']
+            total_revenue = float(revenue_agg or 0)
 
-        # 4. Support & Inquiries Data
-        support_data = {
-            'pending_complaints': Complaint.objects.filter(status='Pending').count(),
-            'resolved_complaints': Complaint.objects.filter(status='Resolved').count(),
-            'pending_inquiries': ContactInquiry.objects.filter(status='Pending').count(),
-            'resolved_inquiries': ContactInquiry.objects.filter(status='Resolved').count(),
-        }
+            total_sessions = ClassSession.objects.count()
+            sessions_month = ClassSession.objects.filter(scheduled_time__gte=month_start).count()
+            completed_sessions = ClassSession.objects.filter(status='Completed').count()
+            live_sessions = ClassSession.objects.filter(status='Live').count()
+            scheduled_sessions = ClassSession.objects.filter(status='Scheduled').count()
+            needs_review_sessions = ClassSession.objects.filter(status='Needs Review').count()
+            not_conducted_sessions = ClassSession.objects.filter(status='Not Conducted').count()
 
-        # 5. Careers Data
-        careers_data = {
-            'total_applications': JobApplication.objects.count(),
-            'pending_applications': JobApplication.objects.filter(status='pending').count(),
-        }
+            recent_bookings = list(
+                Booking.objects.select_related('student', 'course')
+                .order_by('-created_at')[:5]
+                .values('id', 'student__email', 'course__name', 'advance_amount', 'booking_status', 'payment_status', 'created_at')
+            )
+            for b in recent_bookings:
+                if b.get('created_at'):
+                    b['created_at'] = b['created_at'].isoformat()
+                b['advance_amount'] = float(b.get('advance_amount') or 0)
 
-        # 6. Global User Counts
-        user_counts = {
-            'total_users': User.objects.count(),
-            'active_users': User.objects.filter(is_active=True).count(),
-            'students': User.objects.filter(role='student').count(),
-            'teachers': User.objects.filter(role='teacher').count(),
-            'staff': User.objects.filter(role='staff').count(),
-            'managers': User.objects.filter(role='manager').count(),
-            'admins': User.objects.filter(role='admin').count(),
-        }
+            recent_needs_review = list(
+                ClassSession.objects.filter(status__in=['Scheduled', 'Needs Review'])
+                .filter(scheduled_time__lt=t0)
+                .select_related('course', 'teacher')
+                .order_by('-scheduled_time')[:5]
+                .values('id', 'title', 'course__name', 'teacher__email', 'scheduled_time', 'status')
+            )
+            for s in recent_needs_review:
+                if s.get('scheduled_time'):
+                    s['scheduled_time'] = s['scheduled_time'].isoformat()
+
+            classes_data = {
+                'total_courses': total_courses,
+                'active_courses': active_courses,
+                'inactive_courses': max(0, total_courses - active_courses),
+                'total_teachers': total_teachers,
+                'approved_teachers': approved_teachers,
+                'pending_teachers': pending_teachers,
+                'total_students': total_students,
+                'total_bookings': total_bookings,
+                'confirmed_bookings': confirmed_bookings,
+                'total_revenue': total_revenue,
+                'total_sessions': total_sessions,
+                'sessions_month': sessions_month,
+                'completed_sessions': completed_sessions,
+                'live_sessions': live_sessions,
+                'scheduled_sessions': scheduled_sessions,
+                'needs_review_sessions': needs_review_sessions,
+                'not_conducted_sessions': not_conducted_sessions,
+                'recent_bookings': recent_bookings,
+                'recent_needs_review': recent_needs_review,
+            }
+        except Exception as e:
+            subsystem_health['classes'] = 'degraded'
+            subsystem_errors['classes'] = str(e)
+            classes_data = {'error': str(e)}
+
+        # 2. GATE Platform Telemetry
+        gate_data = {}
+        try:
+            gate_students = User.objects.filter(platform='gate', role='student').count()
+            gate_materials = StudyMaterial.objects.count()
+            gate_questions = Question.objects.count()
+            gate_tests = MockTest.objects.count()
+            pending_requests = CourseRequest.objects.filter(status='Pending').count()
+            approved_requests = CourseRequest.objects.filter(status='Approved').count()
+
+            recent_requests = list(
+                CourseRequest.objects.select_related('student', 'branch')
+                .order_by('-id')[:5]
+                .values('id', 'student__email', 'branch__name', 'status')
+            )
+
+            gate_data = {
+                'total_students': gate_students,
+                'total_materials': gate_materials,
+                'total_questions': gate_questions,
+                'total_tests_taken': gate_tests,
+                'pending_requests': pending_requests,
+                'approved_requests': approved_requests,
+                'recent_requests': recent_requests,
+            }
+        except Exception as e:
+            subsystem_health['gate'] = 'degraded'
+            subsystem_errors['gate'] = str(e)
+            gate_data = {'error': str(e)}
+
+        # 3. Staff & HR Operations Telemetry
+        staff_data = {}
+        try:
+            total_staff = User.objects.filter(role='staff').count()
+            total_managers = User.objects.filter(role='manager').count()
+            total_tasks = StaffTask.objects.count()
+            tasks_assigned = StaffTask.objects.filter(status='assigned').count()
+            tasks_in_progress = StaffTask.objects.filter(status='in_progress').count()
+            tasks_in_review = StaffTask.objects.filter(status='submitted_for_review').count()
+            tasks_completed = StaffTask.objects.filter(status='completed').count()
+            unpaid_completed_tasks = StaffTask.objects.filter(status='completed', payment_status__in=['not_assigned', 'awaiting_review', 'amount_assigned']).count()
+            payments_awaiting_approval = StaffTask.objects.filter(payment_status__in=['awaiting_review', 'amount_assigned']).count()
+
+            payroll_earned = float(StaffWallet.objects.aggregate(total=db_models.Sum('total_earned'))['total'] or 0)
+            payroll_paid = float(StaffWallet.objects.aggregate(total=db_models.Sum('total_paid'))['total'] or 0)
+            payroll_balance = round(payroll_earned - payroll_paid, 2)
+
+            recent_review_tasks = list(
+                StaffTask.objects.filter(status='submitted_for_review')
+                .select_related('assigned_to')
+                .order_by('-submitted_at')[:5]
+                .values('id', 'title', 'assigned_to__email', 'submitted_at', 'time_spent_hours')
+            )
+            for t in recent_review_tasks:
+                if t.get('submitted_at'):
+                    t['submitted_at'] = t['submitted_at'].isoformat()
+                t['time_spent_hours'] = float(t.get('time_spent_hours') or 0)
+
+            recent_wallet_tx = list(
+                WalletTransaction.objects.select_related('wallet__staff')
+                .order_by('-created_at')[:5]
+                .values('id', 'wallet__staff__email', 'type', 'amount', 'note', 'created_at')
+            )
+            for tx in recent_wallet_tx:
+                if tx.get('created_at'):
+                    tx['created_at'] = tx['created_at'].isoformat()
+                tx['amount'] = float(tx.get('amount') or 0)
+
+            staff_data = {
+                'total_staff': total_staff,
+                'total_managers': total_managers,
+                'total_tasks': total_tasks,
+                'tasks_assigned': tasks_assigned,
+                'tasks_in_progress': tasks_in_progress,
+                'tasks_in_review': tasks_in_review,
+                'tasks_completed': tasks_completed,
+                'unpaid_completed_tasks': unpaid_completed_tasks,
+                'payments_awaiting_approval': payments_awaiting_approval,
+                'total_payroll_earned': payroll_earned,
+                'total_payroll_paid': payroll_paid,
+                'total_payroll_balance': payroll_balance,
+                'recent_review_tasks': recent_review_tasks,
+                'recent_wallet_transactions': recent_wallet_tx,
+            }
+        except Exception as e:
+            subsystem_health['staff'] = 'degraded'
+            subsystem_errors['staff'] = str(e)
+            staff_data = {'error': str(e)}
+
+        # 4. Support & Inquiries Telemetry
+        support_data = {}
+        try:
+            total_complaints = Complaint.objects.count()
+            pending_complaints = Complaint.objects.filter(status='Pending').count()
+            resolved_complaints = Complaint.objects.filter(status='Resolved').count()
+            total_inquiries = ContactInquiry.objects.count()
+            pending_inquiries = ContactInquiry.objects.filter(status='Pending').count()
+            resolved_inquiries = ContactInquiry.objects.filter(status='Resolved').count()
+
+            recent_complaints = list(
+                Complaint.objects.select_related('student')
+                .order_by('-created_at')[:5]
+                .values('id', 'student__email', 'subject', 'status', 'created_at')
+            )
+            for c in recent_complaints:
+                if c.get('created_at'):
+                    c['created_at'] = c['created_at'].isoformat()
+
+            recent_inquiries = list(
+                ContactInquiry.objects.order_by('-created_at')[:5]
+                .values('id', 'name', 'email', 'message', 'course', 'platform', 'status', 'created_at')
+            )
+            for inq in recent_inquiries:
+                if inq.get('created_at'):
+                    inq['created_at'] = inq['created_at'].isoformat()
+
+            support_data = {
+                'total_complaints': total_complaints,
+                'pending_complaints': pending_complaints,
+                'resolved_complaints': resolved_complaints,
+                'total_inquiries': total_inquiries,
+                'pending_inquiries': pending_inquiries,
+                'resolved_inquiries': resolved_inquiries,
+                'recent_complaints': recent_complaints,
+                'recent_inquiries': recent_inquiries,
+            }
+        except Exception as e:
+            subsystem_health['support'] = 'degraded'
+            subsystem_errors['support'] = str(e)
+            support_data = {'error': str(e)}
+
+        # 5. Careers Telemetry
+        careers_data = {}
+        try:
+            total_applications = JobApplication.objects.count()
+            pending_applications = JobApplication.objects.filter(interviewed=False).count()
+            interviewed_applications = JobApplication.objects.filter(interviewed=True).count()
+
+            recent_applications = list(
+                JobApplication.objects.order_by('-created_at')[:5]
+                .values('id', 'name', 'email', 'position', 'interviewed', 'created_at')
+            )
+            for app in recent_applications:
+                if app.get('created_at'):
+                    app['created_at'] = app['created_at'].isoformat()
+
+            careers_data = {
+                'total_applications': total_applications,
+                'pending_applications': pending_applications,
+                'interviewed_applications': interviewed_applications,
+                'recent_applications': recent_applications,
+            }
+        except Exception as e:
+            subsystem_health['careers'] = 'degraded'
+            subsystem_errors['careers'] = str(e)
+            careers_data = {'error': str(e)}
+
+        # 6. Global User Directory
+        users_data = {}
+        try:
+            total_users = User.objects.count()
+            active_users = User.objects.filter(is_active=True).count()
+            verified_users = User.objects.filter(is_verified=True).count()
+            role_breakdown = {
+                'students': User.objects.filter(role='student').count(),
+                'teachers': User.objects.filter(role='teacher').count(),
+                'staff': User.objects.filter(role='staff').count(),
+                'managers': User.objects.filter(role='manager').count(),
+                'admins': User.objects.filter(role='admin').count(),
+            }
+            platform_breakdown = {
+                'classes': User.objects.filter(platform='classes').count(),
+                'gate': User.objects.filter(platform='gate').count(),
+                'staff': User.objects.filter(role__in=['staff', 'manager']).count(),
+            }
+            recent_users = list(
+                User.objects.order_by('-date_joined')[:5]
+                .values('id', 'email', 'first_name', 'last_name', 'role', 'platform', 'date_joined')
+            )
+            for u in recent_users:
+                if u.get('date_joined'):
+                    u['date_joined'] = u['date_joined'].isoformat()
+                u['name'] = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or u.get('email')
+
+            users_data = {
+                'total_users': total_users,
+                'active_users': active_users,
+                'verified_users': verified_users,
+                'role_breakdown': role_breakdown,
+                'platform_breakdown': platform_breakdown,
+                'recent_users': recent_users,
+            }
+        except Exception as e:
+            subsystem_health['users'] = 'degraded'
+            subsystem_errors['users'] = str(e)
+            users_data = {'error': str(e)}
+
+        t1 = timezone.now()
+        latency_ms = round((t1 - t0).total_seconds() * 1000, 2)
 
         return Response({
+            'system_health': subsystem_health,
+            'subsystem_errors': subsystem_errors,
             'classes': classes_data,
             'gate': gate_data,
             'staff': staff_data,
             'support': support_data,
             'careers': careers_data,
-            'users': user_counts,
-            'timestamp': now.isoformat()
+            'users': users_data,
+            'latency_ms': latency_ms,
+            'timestamp': t1.isoformat(),
         })
 
 
 class ManagerWalletListView(generics.ListAPIView):
-    """Manager sees all wallets."""
+    """Manager sees all wallets for all staff, managers, and approved teachers."""
     permission_classes = [IsAuthenticated]
     serializer_class = StaffWalletSerializer
 
     def get_queryset(self):
         if not is_admin_or_manager(self.request.user):
             raise PermissionDenied()
-        return StaffWallet.objects.select_related('staff').all().order_by('-updated_at')
+
+        # Find all active staff, managers, and approved teachers
+        eligible_users = User.objects.filter(
+            db_models.Q(role__in=['staff', 'manager']) |
+            db_models.Q(role='teacher', classes_teacher_profile__is_approved=True)
+        ).filter(is_active=True)
+
+        # Auto-create wallet for each eligible staff member and approved teacher
+        for u in eligible_users:
+            StaffWallet.objects.get_or_create(staff=u)
+
+        # Return wallets for all eligible staff and approved teachers + anyone with wallet balance or history
+        queryset = StaffWallet.objects.select_related('staff').filter(
+            db_models.Q(staff__in=eligible_users) |
+            db_models.Q(total_earned__gt=0) |
+            db_models.Q(total_paid__gt=0)
+        ).distinct()
+
+        # Role filter
+        role = self.request.query_params.get('role')
+        if role and role != 'all':
+            queryset = queryset.filter(staff__role=role)
+
+        # Search filter
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                db_models.Q(staff__email__icontains=search) |
+                db_models.Q(staff__first_name__icontains=search) |
+                db_models.Q(staff__last_name__icontains=search)
+            )
+
+        return queryset.order_by('-updated_at')
 
 
 class ManagerWalletDetailView(generics.RetrieveAPIView):

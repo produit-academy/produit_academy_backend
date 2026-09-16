@@ -23,17 +23,26 @@ class StaffProfileSerializer(serializers.ModelSerializer):
     phone_number = serializers.CharField(source='user.phone_number', read_only=True)
     department_name = serializers.CharField(source='department.name', read_only=True)
     department_modules = serializers.JSONField(source='department.allowed_modules', read_only=True)
+    assigned_modules = serializers.JSONField(required=False, default=list)
+    effective_modules = serializers.SerializerMethodField()
 
     class Meta:
         model = StaffProfile
         fields = [
             'id', 'email', 'full_name', 'role', 'phone_number',
             'department', 'department_name', 'department_modules',
+            'assigned_modules', 'effective_modules',
             'designation', 'profile_picture', 'bio', 'joined_at'
         ]
 
     def get_full_name(self, obj):
         return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.email
+
+    def get_effective_modules(self, obj):
+        mods = set(obj.assigned_modules or [])
+        if obj.department and obj.department.allowed_modules:
+            mods.update(obj.department.allowed_modules)
+        return list(mods)
 
 
 class TaskCommentSerializer(serializers.ModelSerializer):
@@ -160,14 +169,16 @@ class StaffTaskSerializer(serializers.ModelSerializer):
 class SuperAdminUserSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     department_name = serializers.SerializerMethodField()
+    department_id = serializers.SerializerMethodField()
     designation = serializers.SerializerMethodField()
+    modules = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'role', 'platform',
             'phone_number', 'branch', 'branch_name',
-            'department_name', 'designation',
+            'department_id', 'department_name', 'designation', 'modules',
             'is_active', 'is_verified', 'date_joined',
         ]
 
@@ -177,11 +188,27 @@ class SuperAdminUserSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    def get_department_id(self, obj):
+        try:
+            return obj.staff_profile.department_id
+        except Exception:
+            return None
+
     def get_designation(self, obj):
         try:
             return obj.staff_profile.designation
         except Exception:
             return None
+
+    def get_modules(self, obj):
+        try:
+            profile = obj.staff_profile
+            mods = set(profile.assigned_modules or [])
+            if profile.department and profile.department.allowed_modules:
+                mods.update(profile.department.allowed_modules)
+            return list(mods)
+        except Exception:
+            return []
 
 
 # --- WALLET SERIALIZERS ---
@@ -201,14 +228,36 @@ class StaffWalletSerializer(serializers.ModelSerializer):
     staff_email = serializers.EmailField(source='staff.email', read_only=True)
     staff_name = serializers.SerializerMethodField()
     staff_role = serializers.CharField(source='staff.role', read_only=True)
+    role_display = serializers.SerializerMethodField()
+    hourly_rate = serializers.SerializerMethodField()
+    phone_number = serializers.CharField(source='staff.phone_number', read_only=True, default='')
 
     class Meta:
         model = StaffWallet
-        fields = ['id', 'staff', 'staff_email', 'staff_name', 'staff_role',
+        fields = ['id', 'staff', 'staff_email', 'staff_name', 'staff_role', 'role_display',
+                  'hourly_rate', 'phone_number',
                   'total_earned', 'total_paid', 'balance', 'transactions', 'updated_at']
 
     def get_staff_name(self, obj):
         return f"{obj.staff.first_name} {obj.staff.last_name}".strip() or obj.staff.email
+
+    def get_role_display(self, obj):
+        if obj.staff.role == 'teacher':
+            try:
+                if obj.staff.classes_teacher_profile.is_approved:
+                    return 'Teacher (Approved)'
+                return 'Teacher (Pending)'
+            except Exception:
+                return 'Teacher'
+        return obj.staff.role.capitalize() if obj.staff.role else 'Staff'
+
+    def get_hourly_rate(self, obj):
+        if obj.staff.role == 'teacher':
+            try:
+                return str(obj.staff.classes_teacher_profile.hourly_rate)
+            except Exception:
+                return '0.00'
+        return None
 
 
 class ManagerStaffSerializer(serializers.ModelSerializer):
@@ -218,12 +267,13 @@ class ManagerStaffSerializer(serializers.ModelSerializer):
     designation = serializers.SerializerMethodField()
     task_count = serializers.SerializerMethodField()
     wallet_balance = serializers.SerializerMethodField()
+    modules = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'email', 'full_name', 'role', 'phone_number',
-            'department_name', 'designation', 'is_active',
+            'department_name', 'designation', 'modules', 'is_active',
             'task_count', 'wallet_balance', 'date_joined',
         ]
 
@@ -250,3 +300,13 @@ class ManagerStaffSerializer(serializers.ModelSerializer):
             return str(obj.wallet.balance)
         except Exception:
             return '0.00'
+
+    def get_modules(self, obj):
+        try:
+            profile = obj.staff_profile
+            mods = set(profile.assigned_modules or [])
+            if profile.department and profile.department.allowed_modules:
+                mods.update(profile.department.allowed_modules)
+            return list(mods)
+        except Exception:
+            return []

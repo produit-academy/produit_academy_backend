@@ -203,6 +203,10 @@ class StaffProfile(models.Model):
         null=True, blank=True, related_name='staff_members'
     )
     designation = models.CharField(max_length=100, blank=True, null=True)
+    assigned_modules = models.JSONField(
+        default=list, blank=True,
+        help_text="Individual staff module permissions"
+    )
     profile_picture = models.ImageField(upload_to='staff_profiles/', blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
     joined_at = models.DateTimeField(auto_now_add=True)
@@ -211,9 +215,11 @@ class StaffProfile(models.Model):
         return f"Staff Profile - {self.user.email}"
 
     def has_module_access(self, module_key):
-        if not self.department:
-            return False
-        return module_key in (self.department.allowed_modules or [])
+        if module_key in (self.assigned_modules or []):
+            return True
+        if self.department and module_key in (self.department.allowed_modules or []):
+            return True
+        return False
 
 
 class StaffTask(models.Model):

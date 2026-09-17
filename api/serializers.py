@@ -3,9 +3,19 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
 from .models import User, Branch, CourseRequest, Session
 
+from rest_framework_simplejwt.settings import api_settings
+from django.contrib.auth.models import update_last_login
+
 # --- AUTH & CORE SERIALIZERS ---
 
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Allow either email or username in the login payload
+        self.fields['email'] = serializers.CharField(required=False, write_only=True)
+        self.fields['username'] = serializers.CharField(required=False, write_only=True)
+        self.fields['password'] = serializers.CharField(write_only=True)
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -24,24 +34,47 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
-        # Manually check for inactive user (unverified) *before* standard auth fails
-        email = attrs.get('email') or attrs.get('username')
-        password = attrs.get('password')
+        identifier = (attrs.get('email') or attrs.get('username') or '').strip()
+        password = attrs.get('password') or ''
 
-        if email and password:
-            user = User.objects.filter(email=email).first()
-            if user:
-                # Check password manually to distinguish between "Wrong Password" and "Inactive"
-                if user.check_password(password):
-                    if not user.is_active:
-                         raise AuthenticationFailed('Account is inactive.')
+        if not identifier or not password:
+            raise AuthenticationFailed('Email/username and password are required.')
 
-        data = super().validate(attrs)
-        
-        # Double check (though usually caught above)
-        if not self.user.is_active:
-            raise AuthenticationFailed('Account is inactive.')
-            
+        # Case-insensitive lookup by email or username
+        user = (
+            User.objects.filter(email__iexact=identifier).first()
+            or User.objects.filter(username__iexact=identifier).first()
+        )
+
+        if not user:
+            raise AuthenticationFailed('No account found with this email or username.')
+
+        # Account status and active check
+        account_status = getattr(user, 'account_status', 'active')
+        if not user.is_active or account_status in ['banned', 'hold']:
+            reason = getattr(user, 'status_reason', '')
+            msg = f"Account is {account_status}: {reason}" if reason else "Account is inactive or suspended. Please contact support."
+            raise AuthenticationFailed(msg)
+
+        if not user.has_usable_password():
+            raise AuthenticationFailed('This account does not have a password set. Please use OTP login or complete your registration.')
+
+        if not user.check_password(password):
+            raise AuthenticationFailed('Incorrect password. Please try again.')
+
+        self.user = user
+        refresh = self.get_token(user)
+
+        data = {
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+            'role': 'admin' if user.is_superuser else user.role,
+            'is_staff_user': hasattr(user, 'staff_profile') or user.role in ['staff', 'manager', 'admin'] or user.is_superuser or user.is_staff,
+        }
+
+        if api_settings.UPDATE_LAST_LOGIN:
+            update_last_login(None, user)
+
         return data
 
 class UserSerializer(serializers.ModelSerializer):

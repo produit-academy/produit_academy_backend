@@ -309,23 +309,18 @@ class MyTokenObtainPairView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
         if response.status_code == status.HTTP_200_OK:
-            serializer = self.get_serializer(data=request.data)
             try:
-                serializer.is_valid(raise_exception=True)
-                user = serializer.user
-                
+                identifier = (request.data.get('email') or request.data.get('username') or '').strip()
+                user = (
+                    User.objects.filter(email__iexact=identifier).first()
+                    or User.objects.filter(username__iexact=identifier).first()
+                )
                 # Single Session Enforcement (STUDENTS ONLY)
-                if user.role == 'student' and not user.is_staff and not user.is_superuser:
+                if user and user.role == 'student' and not user.is_staff and not user.is_superuser:
                     Session.objects.filter(user=user).delete()
                     session_key = response.data.get('access')
                     if session_key:
                         Session.objects.create(user=user, session_key=str(session_key))
-                
-                if user.is_superuser:
-                    response.data['role'] = 'admin'
-                else:
-                    response.data['role'] = user.role
-                response.data['is_staff_user'] = hasattr(user, 'staff_profile') or user.role in ['staff', 'manager', 'admin'] or user.is_superuser or user.is_staff
             except Exception:
                 pass
         return response
@@ -412,9 +407,13 @@ class ChangePasswordView(generics.UpdateAPIView):
 class PasswordResetRequestOTPView(APIView):
     permission_classes = [permissions.AllowAny]
     def post(self, request):
-        email = request.data.get('email')
+        email = (request.data.get('email') or '').strip()
+        if not email:
+            return Response({'detail': 'Email is required'}, status=400)
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.filter(email__iexact=email).first()
+            if not user:
+                return Response({'detail': 'User not found'}, status=404)
             otp = str(random.randint(100000, 999999))
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
@@ -424,25 +423,30 @@ class PasswordResetRequestOTPView(APIView):
                 return Response({'detail': 'OTP sent'})
             except Exception:
                 return Response({'detail': 'Failed to send email'}, status=500)
-        except User.DoesNotExist:
-            return Response({'detail': 'User not found'}, status=404)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=500)
 
 class PasswordResetConfirmView(APIView):
     permission_classes = [permissions.AllowAny]
     def post(self, request):
-        email = request.data.get('email')
-        otp = request.data.get('otp')
+        email = (request.data.get('email') or '').strip()
+        otp = str(request.data.get('otp') or '').strip()
         password = request.data.get('password')
+        if not email or not otp or not password:
+            return Response({'detail': 'Email, OTP, and new password are required'}, status=400)
         try:
-            user = User.objects.get(email=email)
-            if user.otp == otp and user.otp_expiry > timezone.now():
+            user = User.objects.filter(email__iexact=email).first()
+            if not user:
+                return Response({'detail': 'User not found'}, status=404)
+            if user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
                 user.set_password(password)
                 user.otp = None
+                user.otp_expiry = None
                 user.save()
                 return Response({'detail': 'Password reset successful'})
-            return Response({'detail': 'Invalid OTP'}, status=400)
-        except User.DoesNotExist:
-            return Response({'detail': 'User not found'}, status=404)
+            return Response({'detail': 'Invalid or expired OTP'}, status=400)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=500)
 
 # --- DASHBOARD & USER MANAGEMENT ---
 

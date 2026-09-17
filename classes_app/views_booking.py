@@ -641,9 +641,25 @@ class StudentPaymentHistoryView(APIView):
 # ADMIN PAYMENT AUDIT & RECONCILIATION
 # ============================================================
 
+class HasFinanceAccess(permissions.BasePermission):
+    """
+    Grants access to superusers, admin/manager roles, Django is_staff,
+    or staff users with 'finance' module access.
+    """
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser or user.role in ['admin', 'manager']:
+            return True
+        if user.role == 'staff' and hasattr(user, 'staff_profile'):
+            return user.staff_profile.has_module_access('finance')
+        return False
+
+
 class AdminPaymentListView(APIView):
     """Admin views all payment transactions with filters and search."""
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [HasFinanceAccess]
 
     def get(self, request):
         bookings = Booking.objects.all().select_related('student', 'teacher', 'subject', 'course').order_by('-created_at')
@@ -699,7 +715,7 @@ class AdminPaymentListView(APIView):
 
 class AdminPaymentRecheckView(APIView):
     """Admin initiates Razorpay gateway sync to check and update order/payment status."""
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [HasFinanceAccess]
 
     def post(self, request, pk):
         result = recheck_razorpay_payment(pk)
@@ -710,7 +726,7 @@ class AdminPaymentRecheckView(APIView):
 
 class AdminPaymentReconcileView(APIView):
     """Admin manually reconciles a booking payment."""
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [HasFinanceAccess]
 
     def post(self, request, pk):
         reason = request.data.get('reason', '').strip()

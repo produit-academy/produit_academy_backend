@@ -1,6 +1,7 @@
 from django.shortcuts import get_object_or_404
 from django.http import FileResponse, Http404
 from django.utils import timezone
+from django.db.models import Q
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 from rest_framework import generics, permissions, status, parsers, viewsets
@@ -78,8 +79,24 @@ class StudyMaterialView(generics.ListAPIView):
         else:
             return StudyMaterial.objects.filter(branch=user.branch, is_preview=True)
 
+class HasGateContentAccess(permissions.BasePermission):
+    """
+    Grants access to superusers, admin/manager, Django is_staff,
+    or staff with 'gate_content' module access.
+    """
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser or user.role in ['admin', 'manager']:
+            return True
+        if user.role == 'staff' and hasattr(user, 'staff_profile'):
+            return user.staff_profile.has_module_access('gate_content')
+        return False
+
+
 class StudyMaterialUploadView(generics.CreateAPIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [HasGateContentAccess]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
     queryset = StudyMaterial.objects.all()
     serializer_class = StudyMaterialSerializer
@@ -99,10 +116,19 @@ class MaterialFileView(APIView):
 # --- ADMIN: QUESTION BANK & CATEGORY MANAGEMENT ---
 
 class AdminQuestionBankView(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAdminUser]
-    queryset = Question.objects.all().select_related('branch').prefetch_related('choices').order_by('-created_at')
+    permission_classes = [HasGateContentAccess]
     serializer_class = QuestionBankSerializer
     pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        qs = Question.objects.all().select_related('branch').prefetch_related('choices').order_by('-created_at')
+        branch_id = self.request.query_params.get('branch')
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(text__icontains=search) | Q(category__icontains=search))
+        return qs
 
 
 # --- STUDENT: CUSTOM MOCK TEST SYSTEM ---

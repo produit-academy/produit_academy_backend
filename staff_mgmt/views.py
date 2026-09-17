@@ -58,7 +58,8 @@ AVAILABLE_MODULES = [
     {'key': 'support', 'label': 'Support', 'description': 'Complaints & Contact Inquiries'},
     {'key': 'careers', 'label': 'Careers', 'description': 'Job Applications'},
     {'key': 'gate_content', 'label': 'GATE Content', 'description': 'Questions & Study Materials'},
-    {'key': 'classes', 'label': 'Classes', 'description': 'Courses, Enrollments, Attendance'},
+    {'key': 'classes', 'label': 'Classes', 'description': 'Courses, Enrollments, Attendance & Sessions'},
+    {'key': 'finance', 'label': 'Finance', 'description': 'Payments & Gateway Reconciliation'},
     {'key': 'analytics', 'label': 'Analytics', 'description': 'Dashboard Stats & Reports'},
 ]
 

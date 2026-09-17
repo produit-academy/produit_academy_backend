@@ -1174,6 +1174,16 @@ class CompleteSessionView(APIView):
             return Response({'error': 'Session not found'}, status=404)
 
 
+def is_classes_staff_or_admin(user):
+    if not user or not user.is_authenticated:
+        return False
+    if user.is_superuser or user.role in ['admin', 'manager']:
+        return True
+    if user.role == 'staff' and hasattr(user, 'staff_profile'):
+        return user.staff_profile.has_module_access('classes')
+    return False
+
+
 class ClassSessionOutcomeView(APIView):
     """
     Teacher or Admin marks the final outcome of a class session:
@@ -1194,7 +1204,7 @@ class ClassSessionOutcomeView(APIView):
             return Response({'error': f'Reason/remarks are required when marking as {outcome}.'}, status=400)
 
         try:
-            if request.user.is_staff or request.user.is_superuser:
+            if is_classes_staff_or_admin(request.user):
                 session = ClassSession.objects.get(pk=pk)
             else:
                 session = ClassSession.objects.get(pk=pk, teacher=request.user)
@@ -1246,7 +1256,7 @@ class ClassSessionMeetLinkView(APIView):
             return Response({'error': 'Please provide a valid Google Meet link (e.g. https://meet.google.com/abc-defg-hij).'}, status=400)
 
         try:
-            if request.user.is_staff or request.user.is_superuser:
+            if is_classes_staff_or_admin(request.user):
                 session = ClassSession.objects.select_related('student', 'teacher', 'course').get(pk=pk)
             else:
                 session = ClassSession.objects.select_related('student', 'teacher', 'course').get(pk=pk, teacher=request.user)
@@ -1281,6 +1291,41 @@ class ClassSessionMeetLinkView(APIView):
             'meeting_link': session.meeting_link,
             'updated_at': session.meet_link_updated_at.isoformat()
         })
+
+
+class AdminClassSessionsListView(APIView):
+    """
+    Staff / Admin view all class sessions across courses with search and filters.
+    Accessible to superusers, admin/manager, and staff with 'classes' module access.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if not is_classes_staff_or_admin(request.user):
+            raise PermissionDenied("You do not have permission to view class sessions.")
+
+        queryset = ClassSession.objects.all().select_related('course', 'teacher', 'student').order_by('-scheduled_time')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search) |
+                Q(course__name__icontains=search) |
+                Q(teacher__first_name__icontains=search) |
+                Q(teacher__last_name__icontains=search) |
+                Q(teacher__email__icontains=search) |
+                Q(student__first_name__icontains=search) |
+                Q(student__last_name__icontains=search) |
+                Q(student__email__icontains=search)
+            )
+
+        sessions_data = ClassSessionSerializer(queryset[:200], many=True).data
+
+        status_param = request.query_params.get('status', '').strip()
+        if status_param and status_param != 'All':
+            sessions_data = [s for s in sessions_data if s.get('effective_status') == status_param or s.get('status') == status_param]
+
+        return Response(sessions_data)
 
 
 # ============================================================

@@ -42,6 +42,73 @@ def confirm_booking_payment(booking_id, razorpay_order_id, razorpay_payment_id, 
             logger.info(f"Booking {booking_id} is already confirmed. Skipping re-processing.")
             return booking, False
 
+        # Lock teacher profile to serialize confirmations for this teacher
+        from classes_app.models import TeacherProfile
+        TeacherProfile.objects.select_for_update().get(user=booking.teacher)
+
+        # Check for slot conflicts with other confirmed bookings or active sessions
+        schedules_to_check = list(booking.schedules.all())
+        has_conflict = False
+        conflict_detail = ""
+
+        for s in schedules_to_check:
+            conflict_sched = BookingSchedule.objects.filter(
+                booking__teacher=booking.teacher,
+                booking__booking_status__in=['confirmed', 'completed'],
+                status='scheduled',
+                date=s.date,
+                start_time=s.start_time
+            ).exclude(booking_id=booking.id).first()
+
+            conflict_ses = ClassSession.objects.filter(
+                teacher=booking.teacher,
+                scheduled_time__date=s.date,
+                scheduled_time__time=s.start_time
+            ).exclude(status='Cancelled').first()
+
+            if conflict_sched or conflict_ses:
+                has_conflict = True
+                conflict_detail = f"Conflict on {s.date} at {s.start_time}"
+                break
+
+        if has_conflict:
+            logger.critical(f"RACE CONDITION CAUGHT: Booking #{booking.id} collided on confirmed slot ({conflict_detail})! Refunding payment {razorpay_payment_id}")
+            booking.booking_status = 'cancelled'
+            booking.payment_status = 'refunded'
+            booking.save(update_fields=['booking_status', 'payment_status'])
+
+            refund_result = None
+            client = get_razorpay_client()
+            if client and razorpay_payment_id:
+                try:
+                    refund_result = client.payment.refund(razorpay_payment_id, {
+                        'amount': int(booking.total_amount * 100),
+                        'notes': {
+                            'reason': 'Automatic refund: slot was booked by another user simultaneously',
+                            'booking_id': str(booking.id)
+                        }
+                    })
+                    logger.info(f"Automatic refund successfully issued for {razorpay_payment_id}: {refund_result}")
+                except Exception as ref_err:
+                    logger.error(f"Failed to issue auto refund for {razorpay_payment_id}: {ref_err}", exc_info=True)
+
+            PaymentTransaction.objects.update_or_create(
+                razorpay_order_id=razorpay_order_id,
+                defaults={
+                    'booking': booking,
+                    'user': booking.student,
+                    'razorpay_payment_id': razorpay_payment_id,
+                    'amount': booking.total_amount,
+                    'status': 'failed',
+                    'error_code': 'SLOT_CONFLICT_REFUNDED',
+                    'error_description': 'This slot was booked by another user simultaneously. A full refund was automatically issued to your payment method.',
+                    'raw_response': {'conflict': True, 'refund_result': refund_result}
+                }
+            )
+            from django.core.cache import cache
+            cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
+            return booking, 'conflict_refunded'
+
         # Mark booking as confirmed
         booking.payment_status = 'advance_paid'
         booking.booking_status = 'confirmed'
@@ -52,6 +119,10 @@ def confirm_booking_payment(booking_id, razorpay_order_id, razorpay_payment_id, 
         if signature:
             booking.razorpay_signature = signature
         booking.save()
+
+        # Invalidate live slot cache
+        from django.core.cache import cache
+        cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
 
         # Create student enrollment
         Enrollment.objects.get_or_create(

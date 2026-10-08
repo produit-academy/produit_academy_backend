@@ -1357,7 +1357,7 @@ class ClassReportListCreateView(APIView):
         if session_id:
             reports = reports.filter(class_session_id=session_id)
 
-        serializer = ClassReportSerializer(reports, many=True)
+        serializer = ClassReportSerializer(reports, many=True, context={'request': request})
         return Response(serializer.data)
 
     def post(self, request):
@@ -1365,7 +1365,7 @@ class ClassReportListCreateView(APIView):
             return Response({'error': 'Only teachers and admins can submit reports.'}, status=403)
 
         data = request.data.copy()
-        serializer = ClassReportSerializer(data=data)
+        serializer = ClassReportSerializer(data=data, context={'request': request})
         if serializer.is_valid():
             report = serializer.save(teacher=request.user)
             if 'pdf_report' in request.FILES:
@@ -1373,7 +1373,7 @@ class ClassReportListCreateView(APIView):
             if 'voice_note' in request.FILES:
                 report.voice_note = request.FILES['voice_note']
             report.save()
-            return Response(ClassReportSerializer(report).data, status=201)
+            return Response(ClassReportSerializer(report, context={'request': request}).data, status=201)
         return Response(serializer.errors, status=400)
 
 
@@ -1403,46 +1403,70 @@ class ClassReportDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class DailyVoiceNoteListCreateView(APIView):
-    """Upload and retrieve daily voice notes for class sessions."""
+    """Upload and retrieve daily voice notes for class sessions or general daily briefings."""
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
-        session_id = request.query_params.get('class_session')
-        if not session_id:
-            return Response({'error': 'class_session query parameter required'}, status=400)
+        user = request.user
+        session_id = request.query_params.get('class_session') or request.query_params.get('session')
         
-        notes = DailyClassVoiceNote.objects.filter(class_session_id=session_id).select_related('teacher')
-        return Response(DailyClassVoiceNoteSerializer(notes, many=True).data)
+        if user.role == 'teacher':
+            notes = DailyClassVoiceNote.objects.filter(teacher=user)
+        elif user.role == 'student':
+            notes = DailyClassVoiceNote.objects.filter(student=user)
+        else: # staff, manager, superuser
+            notes = DailyClassVoiceNote.objects.all()
+
+        if session_id:
+            notes = notes.filter(class_session_id=session_id)
+        
+        notes = notes.select_related('teacher', 'student', 'class_session').order_by('-created_at')
+        return Response(DailyClassVoiceNoteSerializer(notes, many=True, context={'request': request}).data)
 
     def post(self, request):
         if not (request.user.role == 'teacher' or request.user.is_staff or request.user.is_superuser):
             return Response({'error': 'Only teachers can upload voice notes.'}, status=403)
 
-        session_id = request.data.get('class_session')
-        audio_file = request.FILES.get('audio_file')
-        text_summary = request.data.get('text_summary', '')
-        duration_seconds = int(request.data.get('duration_seconds', 0))
-
-        if not session_id or not audio_file:
-            return Response({'error': 'class_session and audio_file are required.'}, status=400)
-
+        session_id = request.data.get('class_session') or request.data.get('session')
+        audio_file = request.FILES.get('audio_file') or request.FILES.get('voice_note')
+        text_summary = request.data.get('text_summary') or request.data.get('summary', '')
+        
         try:
-            session = ClassSession.objects.get(pk=session_id)
-        except ClassSession.DoesNotExist:
-            return Response({'error': 'ClassSession not found.'}, status=404)
+            duration_seconds = int(request.data.get('duration_seconds', 0) or 0)
+        except (ValueError, TypeError):
+            duration_seconds = 0
+
+        if not audio_file:
+            return Response({'error': 'Audio recording or file is required.'}, status=400)
+
+        session = None
+        student = None
+
+        if session_id:
+            try:
+                session = ClassSession.objects.select_related('student').get(pk=session_id)
+                student = session.student
+            except ClassSession.DoesNotExist:
+                return Response({'error': 'ClassSession not found.'}, status=404)
+
+        if not student and request.data.get('student'):
+            try:
+                student = User.objects.get(pk=request.data.get('student'), role='student')
+            except User.DoesNotExist:
+                pass
 
         note = DailyClassVoiceNote.objects.create(
             class_session=session,
             teacher=request.user,
-            student=session.student,
+            student=student,
             audio_file=audio_file,
             text_summary=text_summary,
             duration_seconds=duration_seconds,
             status='submitted'
         )
 
-        return Response(DailyClassVoiceNoteSerializer(note).data, status=201)
+        return Response(DailyClassVoiceNoteSerializer(note, context={'request': request}).data, status=201)
 
 
 class TeacherMonthlyReportListCreateView(APIView):
@@ -1559,92 +1583,294 @@ def _is_past_sunday_deadline():
 
 class TeacherAvailabilityView(APIView):
     """
-    GET: Returns the teacher's availability slots for the upcoming week.
-    POST: Submit availability slots for the upcoming week (blocked after Sunday 6 PM).
+    GET: Returns the teacher's availability slots with booked status.
+    POST: Enter manual slots by teacher with mandatory 1-hour gap enforcement from existing slots.
+    DELETE: Delete an unbooked availability slot.
     """
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
 
     def get(self, request):
-        next_monday, next_sunday = _get_next_week_range()
-        # Also include current week availability
         today = dt_date.today()
+        max_date = today + timedelta(days=60)
+
+        # Get all future availability slots
+        slots = list(TeacherAvailability.objects.filter(
+            teacher=request.user,
+            date__gte=today,
+            date__lte=max_date
+        ).order_by('date', 'start_time'))
+
+        # Fetch booked slots to annotate is_booked
+        active_schedules = BookingSchedule.objects.filter(
+            booking__teacher=request.user,
+            date__gte=today,
+            booking__booking_status__in=['confirmed', 'completed'],
+            status='scheduled'
+        )
+        booked_times = set((s.date, s.start_time) for s in active_schedules)
+
+        active_sessions = ClassSession.objects.filter(
+            teacher=request.user,
+            scheduled_time__date__gte=today
+        ).exclude(status='Cancelled')
+        for ses in active_sessions:
+            booked_times.add((ses.scheduled_time.date(), ses.scheduled_time.time()))
+
+        slots_data = []
+        for s in slots:
+            d = TeacherAvailabilitySerializer(s).data
+            d['is_booked'] = (s.date, s.start_time) in booked_times
+            slots_data.append(d)
+
+        # Week ranges for UI convenience
         current_monday = today - timedelta(days=today.weekday())
         current_sunday = current_monday + timedelta(days=6)
-
-        slots = TeacherAvailability.objects.filter(
-            teacher=request.user,
-            date__gte=current_monday,
-            date__lte=next_sunday
-        )
-        serializer = TeacherAvailabilitySerializer(slots, many=True)
+        next_monday = current_monday + timedelta(days=7)
+        next_sunday = next_monday + timedelta(days=6)
 
         return Response({
-            'slots': serializer.data,
+            'slots': slots_data,
             'current_week': {'start': str(current_monday), 'end': str(current_sunday)},
             'next_week': {'start': str(next_monday), 'end': str(next_sunday)},
-            'deadline_passed': _is_past_sunday_deadline(),
+            'today': str(today),
         })
 
     def post(self, request):
-        if _is_past_sunday_deadline():
-            return Response({
-                'error': 'The deadline has passed. You can only submit availability before Sunday 6:00 PM.'
-            }, status=400)
+        # Allow single slot or array of slots
+        raw_slots = request.data.get('slots')
+        if raw_slots is None:
+            # Check if payload is single slot
+            if request.data.get('date') and request.data.get('start_time'):
+                raw_slots = [request.data]
+            else:
+                return Response({'error': 'Please provide slot details (date, start_time, and end_time).'}, status=400)
 
-        next_monday, next_sunday = _get_next_week_range()
-        slots_data = request.data.get('slots', [])
-
-        if not slots_data:
+        if not raw_slots:
             return Response({'error': 'No slots provided.'}, status=400)
 
-        created = 0
-        updated = 0
-        errors = []
-        for slot in slots_data:
-            slot_date = slot.get('date')
-            start_time = slot.get('start_time')
-            end_time = slot.get('end_time')
+        from datetime import time as dt_time
 
-            if not all([slot_date, start_time, end_time]):
-                errors.append(f'Missing fields in slot: {slot}')
+        created_count = 0
+        updated_count = 0
+        errors = []
+
+        today = dt_date.today()
+
+        for slot_input in raw_slots:
+            slot_date_raw = slot_input.get('date')
+            start_time_raw = slot_input.get('start_time')
+            end_time_raw = slot_input.get('end_time')
+
+            if not slot_date_raw or not start_time_raw:
+                errors.append(f"Date and start_time are required: {slot_input}")
                 continue
 
             try:
-                parsed_date = dt_date.fromisoformat(slot_date)
+                parsed_date = dt_date.fromisoformat(str(slot_date_raw).strip())
             except (ValueError, TypeError):
-                errors.append(f'Invalid date: {slot_date}')
+                errors.append(f"Invalid date format '{slot_date_raw}'. Expected YYYY-MM-DD.")
                 continue
 
-            if parsed_date < next_monday or parsed_date > next_sunday:
-                errors.append(f'Date {slot_date} is not in next week ({next_monday} to {next_sunday}).')
+            if parsed_date < today:
+                errors.append(f"Cannot add availability slots in the past ({parsed_date}).")
+                continue
+
+            # Parse start time
+            try:
+                parts = str(start_time_raw).strip().split(':')
+                start_h = int(parts[0])
+                start_m = int(parts[1]) if len(parts) > 1 else 0
+                parsed_start = dt_time(hour=start_h, minute=start_m)
+            except Exception:
+                errors.append(f"Invalid start_time format '{start_time_raw}'. Expected HH:MM.")
+                continue
+
+            # Parse or auto-calculate end time (default: 60 minutes)
+            if end_time_raw:
+                try:
+                    parts = str(end_time_raw).strip().split(':')
+                    end_h = int(parts[0])
+                    end_m = int(parts[1]) if len(parts) > 1 else 0
+                    parsed_end = dt_time(hour=end_h, minute=end_m)
+                except Exception:
+                    errors.append(f"Invalid end_time format '{end_time_raw}'. Expected HH:MM.")
+                    continue
+            else:
+                # Default 1 hour later
+                end_total_min = start_h * 60 + start_m + 60
+                if end_total_min > 23 * 60 + 59:
+                    end_total_min = 23 * 60 + 59
+                parsed_end = dt_time(hour=end_total_min // 60, minute=end_total_min % 60)
+
+            new_start_min = parsed_start.hour * 60 + parsed_start.minute
+            new_end_min = parsed_end.hour * 60 + parsed_end.minute
+
+            if new_end_min <= new_start_min:
+                errors.append(f"End time ({parsed_end.strftime('%I:%M %p')}) must be after start time ({parsed_start.strftime('%I:%M %p')}).")
+                continue
+
+            duration = new_end_min - new_start_min
+            if duration < 30:
+                errors.append(f"Slot duration must be at least 30 minutes ({parsed_date}).")
+                continue
+            if duration > 240:
+                errors.append(f"Slot duration cannot exceed 4 hours ({parsed_date}).")
+                continue
+
+            # Fetch existing availability slots on this date for 1-hour gap validation
+            existing_slots = list(TeacherAvailability.objects.filter(
+                teacher=request.user,
+                date=parsed_date
+            ))
+
+            # Fetch existing scheduled ClassSessions on this date
+            existing_sessions = list(ClassSession.objects.filter(
+                teacher=request.user,
+                scheduled_time__date=parsed_date
+            ).exclude(status='Cancelled'))
+
+            # Check 1-hour gap against all existing slots on that day
+            conflict_found = False
+
+            for ex in existing_slots:
+                ex_start_min = ex.start_time.hour * 60 + ex.start_time.minute
+                ex_end_min = ex.end_time.hour * 60 + ex.end_time.minute
+
+                # Direct overlap check
+                if new_start_min < ex_end_min and new_end_min > ex_start_min:
+                    errors.append(
+                        f"Slot ({parsed_start.strftime('%I:%M %p')} - {parsed_end.strftime('%I:%M %p')}) overlaps with existing slot ({ex.start_time.strftime('%I:%M %p')} - {ex.end_time.strftime('%I:%M %p')}) on {parsed_date}."
+                    )
+                    conflict_found = True
+                    break
+
+                # 1-hour gap after existing slot
+                if new_start_min >= ex_end_min:
+                    gap = new_start_min - ex_end_min
+                    if gap < 60:
+                        earliest_m = ex_end_min + 60
+                        eh = earliest_m // 60
+                        em = earliest_m % 60
+                        earliest_str = f"{eh % 12 or 12}:{em:02d} {'PM' if eh >= 12 else 'AM'}"
+                        errors.append(
+                            f"Must have at least a 1-hour gap from existing slot ending at {ex.end_time.strftime('%I:%M %p')} on {parsed_date}. Earliest allowed start is {earliest_str}."
+                        )
+                        conflict_found = True
+                        break
+
+                # 1-hour gap before existing slot
+                if new_end_min <= ex_start_min:
+                    gap = ex_start_min - new_end_min
+                    if gap < 60:
+                        latest_m = ex_start_min - 60
+                        lh = latest_m // 60
+                        lm = latest_m % 60
+                        latest_str = f"{lh % 12 or 12}:{lm:02d} {'PM' if lh >= 12 else 'AM'}"
+                        errors.append(
+                            f"Must have at least a 1-hour gap before existing slot starting at {ex.start_time.strftime('%I:%M %p')} on {parsed_date}. Latest allowed end is {latest_str}."
+                        )
+                        conflict_found = True
+                        break
+
+            if conflict_found:
+                continue
+
+            # Check 1-hour gap against existing class sessions
+            for ses in existing_sessions:
+                st = ses.scheduled_time.time()
+                et = (ses.scheduled_time + timedelta(minutes=ses.duration_minutes)).time()
+                ses_start_min = st.hour * 60 + st.minute
+                ses_end_min = et.hour * 60 + et.minute
+
+                if new_start_min < ses_end_min and new_end_min > ses_start_min:
+                    errors.append(
+                        f"Slot overlaps with scheduled class '{ses.title}' ({st.strftime('%I:%M %p')} - {et.strftime('%I:%M %p')}) on {parsed_date}."
+                    )
+                    conflict_found = True
+                    break
+
+                if new_start_min >= ses_end_min and (new_start_min - ses_end_min) < 60:
+                    earliest_m = ses_end_min + 60
+                    eh = earliest_m // 60
+                    em = earliest_m % 60
+                    earliest_str = f"{eh % 12 or 12}:{em:02d} {'PM' if eh >= 12 else 'AM'}"
+                    errors.append(
+                        f"Must have at least a 1-hour gap after class session ending at {et.strftime('%I:%M %p')} on {parsed_date}. Earliest allowed start is {earliest_str}."
+                    )
+                    conflict_found = True
+                    break
+
+                if new_end_min <= ses_start_min and (ses_start_min - new_end_min) < 60:
+                    latest_m = ses_start_min - 60
+                    lh = latest_m // 60
+                    lm = latest_m % 60
+                    latest_str = f"{lh % 12 or 12}:{lm:02d} {'PM' if lh >= 12 else 'AM'}"
+                    errors.append(
+                        f"Must have at least a 1-hour gap before class session starting at {st.strftime('%I:%M %p')} on {parsed_date}. Latest allowed end is {latest_str}."
+                    )
+                    conflict_found = True
+                    break
+
+            if conflict_found:
                 continue
 
             obj, was_created = TeacherAvailability.objects.update_or_create(
                 teacher=request.user,
                 date=parsed_date,
-                start_time=start_time,
-                defaults={'end_time': end_time}
+                start_time=parsed_start,
+                defaults={'end_time': parsed_end}
             )
             if was_created:
-                created += 1
+                created_count += 1
             else:
-                updated += 1
+                updated_count += 1
 
-        total = created + updated
-        return Response({
-            'message': f'{total} slot(s) saved successfully ({created} new, {updated} updated).',
-            'errors': errors if errors else None,
-        })
+        # Invalidate real-time slot cache
+        cache.set(f"teacher_slots_v_{request.user.id}", timezone.now().timestamp(), timeout=86400)
+
+        total = created_count + updated_count
+        if total > 0:
+            msg = f"{total} slot(s) saved successfully with mandatory 1-hour gap ({created_count} new, {updated_count} updated)."
+            return Response({
+                'message': msg,
+                'created': created_count,
+                'updated': updated_count,
+                'errors': errors if errors else None
+            }, status=201 if created_count > 0 else 200)
+        else:
+            return Response({
+                'error': errors[0] if errors else 'Could not save slot(s).',
+                'errors': errors
+            }, status=400)
 
     def delete(self, request):
-        """Delete a specific availability slot."""
+        """Delete a specific availability slot with booking protection."""
         slot_id = request.data.get('slot_id')
         if not slot_id:
             return Response({'error': 'slot_id is required.'}, status=400)
         try:
             slot = TeacherAvailability.objects.get(pk=slot_id, teacher=request.user)
+
+            # Check if this slot is already booked in a confirmed booking or session
+            is_booked = BookingSchedule.objects.filter(
+                booking__teacher=request.user,
+                date=slot.date,
+                start_time=slot.start_time,
+                booking__booking_status__in=['confirmed', 'completed']
+            ).exists() or ClassSession.objects.filter(
+                teacher=request.user,
+                scheduled_time__date=slot.date,
+                scheduled_time__time=slot.start_time
+            ).exclude(status='Cancelled').exists()
+
+            if is_booked:
+                return Response({
+                    'error': 'Cannot delete a slot that is already booked by a student. Please cancel the session from your schedule if needed.'
+                }, status=400)
+
             slot.delete()
-            return Response({'message': 'Slot deleted.'})
+            cache.set(f"teacher_slots_v_{request.user.id}", timezone.now().timestamp(), timeout=86400)
+            return Response({'message': 'Slot deleted successfully.'})
         except TeacherAvailability.DoesNotExist:
             return Response({'error': 'Slot not found.'}, status=404)
 

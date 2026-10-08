@@ -52,6 +52,7 @@ from .views_booking import (
     AdminPaymentListView,
     AdminPaymentRecheckView,
     AdminPaymentReconcileView,
+    TeacherLiveSlotsView,
 )
 
 urlpatterns = [
@@ -66,6 +67,7 @@ urlpatterns = [
     path('subjects/', SubjectListView.as_view(), name='classes-subjects'),
     path('teachers/', TeachersBySubjectView.as_view(), name='classes-teachers-by-subject'),
     path('teacher-profile/<int:pk>/', TeacherProfileDetailView.as_view(), name='classes-teacher-profile'),
+    path('teacher/<int:pk>/live-slots/', TeacherLiveSlotsView.as_view(), name='teacher-live-slots'),
 
     # Dashboard Feeds
     path('student/dashboard/', StudentDashboardView.as_view(), name='classes-student-dashboard'),

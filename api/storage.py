@@ -18,9 +18,10 @@ class CloudinaryMediaStorage(Storage):
     def _save(self, name, content):
         clean_name = str(name).replace('\\', '/').lstrip('/')
         folder = os.path.dirname(clean_name)
+        ext = os.path.splitext(clean_name)[1].lower()
 
         upload_options = {
-            'resource_type': 'auto',
+            'resource_type': 'video' if ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.mp3', '.wav', '.ogg', '.m4a', '.aac'] else 'auto',
             'use_filename': True,
             'unique_filename': True,
         }

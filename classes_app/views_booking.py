@@ -156,7 +156,7 @@ class TeacherProfileDetailView(APIView):
 # ============================================================
 
 class StudentBookTeacherView(APIView):
-    """Create a booking for a teacher."""
+    """Create a booking for a teacher with concurrency locking and 15-minute reservation hold."""
     permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
 
     def post(self, request):
@@ -168,135 +168,224 @@ class StudentBookTeacherView(APIView):
         if student.role != 'student':
             return Response({'error': 'Only students can book.'}, status=403)
 
-        try:
-            teacher = User.objects.get(pk=data['teacher_id'], role='teacher')
-            profile = TeacherProfile.objects.get(user=teacher, is_approved=True)
-        except (User.DoesNotExist, TeacherProfile.DoesNotExist):
-            return Response({'error': 'Teacher not found or not approved.'}, status=404)
+        from django.db import transaction
 
-        try:
-            subject = Subject.objects.get(pk=data['subject_id'], is_active=True)
-        except Subject.DoesNotExist:
-            return Response({'error': 'Subject not found.'}, status=404)
+        with transaction.atomic():
+            try:
+                teacher = User.objects.get(pk=data['teacher_id'], role='teacher')
+                # Lock teacher profile to serialize concurrent booking attempts for this teacher
+                profile = TeacherProfile.objects.select_for_update().get(user=teacher, is_approved=True)
+            except (User.DoesNotExist, TeacherProfile.DoesNotExist):
+                return Response({'error': 'Teacher not found or not approved.'}, status=404)
 
-        # Check for duplicate booking
-        existing = Booking.objects.filter(
-            student=student, teacher=teacher, subject=subject,
-            booking_status='confirmed'
-        ).exists()
-        if existing:
-            return Response({'error': 'You already have an active booking with this teacher for this subject.'}, status=400)
+            try:
+                subject = Subject.objects.get(pk=data['subject_id'], is_active=True)
+            except Subject.DoesNotExist:
+                return Response({'error': 'Subject not found.'}, status=404)
 
-        # Validate slots
-        slot_ids = data['slot_ids']
-        slots = list(TeacherAvailability.objects.filter(id__in=slot_ids))
-        if len(slots) != len(slot_ids):
-            return Response({'error': 'One or more selected slots are invalid or unavailable.'}, status=400)
-            
-        for slot in slots:
-            if slot.teacher_id != teacher.id:
-                return Response({'error': 'Selected slots do not belong to this teacher.'}, status=400)
-            if slot.date < dt_date.today():
-                return Response({'error': 'Cannot book slots in the past.'}, status=400)
+            # Check for duplicate active booking
+            existing = Booking.objects.filter(
+                student=student, teacher=teacher, subject=subject,
+                booking_status='confirmed'
+            ).exists()
+            if existing:
+                return Response({'error': 'You already have an active confirmed booking with this teacher for this subject.'}, status=400)
 
-        # Check if any slot is already booked by another student
-        active_schedules = BookingSchedule.objects.filter(
-            booking__teacher=teacher,
-            booking__booking_status__in=['confirmed', 'completed'],
-            status='scheduled'
-        )
-        booked_times = set((s.date, s.start_time) for s in active_schedules)
-        for slot in slots:
-            if (slot.date, slot.start_time) in booked_times:
-                return Response({
-                    'error': f"Slot on {slot.date.strftime('%b %d')} at {slot.start_time.strftime('%I:%M %p')} is already booked by another student. Please select an available slot."
-                }, status=400)
+            # Validate requested slots exist
+            slot_ids = data['slot_ids']
+            slots = list(TeacherAvailability.objects.filter(id__in=slot_ids))
+            if len(slots) != len(slot_ids):
+                return Response({'error': 'One or more selected slots are invalid or unavailable.'}, status=400)
 
-        # Calculate derived fields
-        slots.sort(key=lambda s: (s.date, s.start_time))
-        start_date = slots[0].date
-        end_date = slots[-1].date
-        preferred_time = slots[0].start_time
-        num_classes = len(slots)
+            for slot in slots:
+                if slot.teacher_id != teacher.id:
+                    return Response({'error': 'Selected slots do not belong to this teacher.'}, status=400)
+                if slot.date < dt_date.today():
+                    return Response({'error': 'Cannot book slots in the past.'}, status=400)
 
-        # Calculate fees
-        teacher_fee = profile.hourly_rate
-        total_teacher_fee = teacher_fee * num_classes
-        platform_fee = Decimal(str(PLATFORM_FEE))
-        total_amount = total_teacher_fee + platform_fee
-        advance_amount = total_amount
-        remaining_amount = Decimal('0.00')
+            # 1. Clean up expired pending bookings (> 15 minutes hold)
+            hold_cutoff = timezone.now() - timedelta(minutes=15)
+            Booking.objects.filter(
+                teacher=teacher,
+                booking_status='pending',
+                created_at__lt=hold_cutoff
+            ).update(booking_status='cancelled')
 
-        booking = Booking.objects.create(
-            student=student,
-            teacher=teacher,
-            subject=subject,
-            course=subject.course,
-            start_date=start_date,
-            end_date=end_date,
-            preferred_time=preferred_time,
-            num_classes=num_classes,
-            teacher_fee_per_class=teacher_fee,
-            platform_fee=platform_fee,
-            total_amount=total_amount,
-            advance_amount=advance_amount,
-            remaining_amount=remaining_amount,
-            payment_status='pending',
-            booking_status='pending',
-            google_meet_link=profile.google_meet_link or '',
-        )
-
-        # Create BookingSchedule entries immediately
-        for slot in slots:
-            BookingSchedule.objects.create(
-                booking=booking,
-                date=slot.date,
-                start_time=slot.start_time,
-                end_time=slot.end_time,
+            # 2. Check confirmed / completed schedules
+            active_schedules = BookingSchedule.objects.filter(
+                booking__teacher=teacher,
+                booking__booking_status__in=['confirmed', 'completed'],
                 status='scheduled'
             )
+            booked_times = set((s.date, s.start_time) for s in active_schedules)
 
-        return Response({
-            'booking_id': booking.id,
-            'teacher_name': f"{teacher.first_name} {teacher.last_name}".strip(),
-            'subject': subject.name,
-            'num_classes': num_classes,
-            'teacher_fee_per_class': float(teacher_fee),
-            'platform_fee': float(platform_fee),
-            'total_amount': float(total_amount),
-            'advance_amount': float(advance_amount),
-            'remaining_amount': float(remaining_amount),
-            'message': 'Booking created. Proceed to payment.',
-        }, status=201)
+            # 3. Check active ClassSessions
+            active_sessions = ClassSession.objects.filter(
+                teacher=teacher,
+                scheduled_time__date__in=[s.date for s in slots]
+            ).exclude(status='Cancelled')
+            for ses in active_sessions:
+                booked_times.add((ses.scheduled_time.date(), ses.scheduled_time.time()))
+
+            # 4. Check active pending reservations held by other students (within 15 minutes)
+            held_schedules = BookingSchedule.objects.filter(
+                booking__teacher=teacher,
+                booking__booking_status='pending',
+                booking__created_at__gte=hold_cutoff,
+                status='scheduled'
+            ).exclude(booking__student=student)
+            held_times = set((s.date, s.start_time) for s in held_schedules)
+
+            for slot in slots:
+                if (slot.date, slot.start_time) in booked_times:
+                    return Response({
+                        'error': f"Slot on {slot.date.strftime('%b %d')} at {slot.start_time.strftime('%I:%M %p')} is already booked by another student. Please select an available slot.",
+                        'slot_id': slot.id,
+                        'reason': 'already_booked'
+                    }, status=status.HTTP_409_CONFLICT)
+                if (slot.date, slot.start_time) in held_times:
+                    return Response({
+                        'error': f"Slot on {slot.date.strftime('%b %d')} at {slot.start_time.strftime('%I:%M %p')} is currently reserved by another student at checkout. Please try again shortly or pick another slot.",
+                        'slot_id': slot.id,
+                        'reason': 'currently_held'
+                    }, status=status.HTTP_409_CONFLICT)
+
+            # Cancel any previous pending booking by THIS student for this teacher
+            Booking.objects.filter(
+                student=student,
+                teacher=teacher,
+                booking_status='pending'
+            ).update(booking_status='cancelled')
+
+            # Calculate derived fields
+            slots.sort(key=lambda s: (s.date, s.start_time))
+            start_date = slots[0].date
+            end_date = slots[-1].date
+            preferred_time = slots[0].start_time
+            num_classes = len(slots)
+
+            # Calculate fees
+            teacher_fee = profile.hourly_rate
+            total_teacher_fee = teacher_fee * num_classes
+            platform_fee = Decimal(str(PLATFORM_FEE))
+            total_amount = total_teacher_fee + platform_fee
+            advance_amount = total_amount
+            remaining_amount = Decimal('0.00')
+            expires_at = timezone.now() + timedelta(minutes=15)
+
+            booking = Booking.objects.create(
+                student=student,
+                teacher=teacher,
+                subject=subject,
+                course=subject.course,
+                start_date=start_date,
+                end_date=end_date,
+                preferred_time=preferred_time,
+                num_classes=num_classes,
+                teacher_fee_per_class=teacher_fee,
+                platform_fee=platform_fee,
+                total_amount=total_amount,
+                advance_amount=advance_amount,
+                remaining_amount=remaining_amount,
+                payment_status='pending',
+                booking_status='pending',
+                expires_at=expires_at,
+                google_meet_link=profile.google_meet_link or '',
+            )
+
+            # Create BookingSchedule entries immediately to hold the slots
+            for slot in slots:
+                BookingSchedule.objects.create(
+                    booking=booking,
+                    date=slot.date,
+                    start_time=slot.start_time,
+                    end_time=slot.end_time,
+                    status='scheduled'
+                )
+
+            # Invalidate real-time slot cache for teacher
+            cache.set(f"teacher_slots_v_{teacher.id}", timezone.now().timestamp(), timeout=86400)
+
+            return Response({
+                'booking_id': booking.id,
+                'teacher_name': f"{teacher.first_name} {teacher.last_name}".strip(),
+                'subject': subject.name,
+                'num_classes': num_classes,
+                'teacher_fee_per_class': float(teacher_fee),
+                'platform_fee': float(platform_fee),
+                'total_amount': float(total_amount),
+                'advance_amount': float(advance_amount),
+                'remaining_amount': float(remaining_amount),
+                'expires_at': expires_at.isoformat(),
+                'hold_minutes': 15,
+                'message': 'Slots reserved for 15 minutes. Proceed to payment.',
+            }, status=201)
 
 
 class DummyPaymentView(APIView):
-    """Simulate payment, confirm booking, generate schedule, send emails."""
+    """Simulate payment, confirm booking, generate schedule, send emails (Dev/Testing only)."""
     permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
 
     def post(self, request):
+        if not settings.DEBUG and not getattr(settings, 'ALLOW_DUMMY_PAYMENT', False):
+            return Response({'error': 'Dummy payment is disabled in live environment. Please use official Razorpay checkout.'}, status=status.HTTP_403_FORBIDDEN)
+
         booking_id = request.data.get('booking_id')
-        try:
-            booking = Booking.objects.get(pk=booking_id, student=request.user, booking_status='pending')
-        except Booking.DoesNotExist:
-            return Response({'error': 'Booking not found or already processed.'}, status=404)
+        from django.db import transaction
 
-        # Update booking status
-        booking.payment_status = 'advance_paid'
-        booking.booking_status = 'confirmed'
-        booking.save()
+        with transaction.atomic():
+            try:
+                booking = Booking.objects.select_for_update().get(pk=booking_id, student=request.user, booking_status='pending')
+            except Booking.DoesNotExist:
+                return Response({'error': 'Booking not found or already processed.'}, status=404)
 
-        # Auto-create enrollment if not exists
-        Enrollment.objects.get_or_create(
-            student=booking.student, course=booking.course,
-            defaults={'teacher': booking.teacher}
-        )
+            # Check expiration
+            if booking.expires_at and booking.expires_at < timezone.now():
+                booking.booking_status = 'cancelled'
+                booking.save(update_fields=['booking_status'])
+                cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
+                return Response({'error': 'Reservation expired. Please select your slot again.'}, status=400)
 
-        # Generate Class Sessions and Link Schedules
-        schedules = self._process_schedules(booking)
+            # Concurrency check
+            teacher_profile = TeacherProfile.objects.select_for_update().get(user=booking.teacher)
+            for s in booking.schedules.all():
+                conflict = BookingSchedule.objects.filter(
+                    booking__teacher=booking.teacher,
+                    booking__booking_status__in=['confirmed', 'completed'],
+                    status='scheduled',
+                    date=s.date,
+                    start_time=s.start_time
+                ).exclude(booking_id=booking.id).exists() or ClassSession.objects.filter(
+                    teacher=booking.teacher,
+                    scheduled_time__date=s.date,
+                    scheduled_time__time=s.start_time
+                ).exclude(status='Cancelled').exists()
 
-        # Send emails
-        self._send_booking_emails(booking, schedules)
+                if conflict:
+                    booking.booking_status = 'cancelled'
+                    booking.save(update_fields=['booking_status'])
+                    cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
+                    return Response({'error': f'Slot on {s.date} at {s.start_time} is already booked.'}, status=status.HTTP_409_CONFLICT)
+
+            # Update booking status
+            booking.payment_status = 'advance_paid'
+            booking.booking_status = 'confirmed'
+            booking.save()
+
+            # Auto-create enrollment if not exists
+            Enrollment.objects.get_or_create(
+                student=booking.student, course=booking.course,
+                defaults={'teacher': booking.teacher}
+            )
+
+            # Generate Class Sessions and Link Schedules
+            schedules = self._process_schedules(booking)
+
+            # Invalidate live slot cache
+            cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
+
+            # Send emails
+            self._send_booking_emails(booking, schedules)
 
         return Response({
             'message': 'Payment successful! Booking confirmed.',
@@ -396,7 +485,7 @@ class DummyPaymentView(APIView):
 
 
 class CreateRazorpayOrderView(APIView):
-    """Creates an official Razorpay order for a pending booking."""
+    """Creates an official Razorpay order for a pending booking with strict concurrency locking."""
     permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
 
     def post(self, request):
@@ -404,62 +493,96 @@ class CreateRazorpayOrderView(APIView):
         if not booking_id:
             return Response({'error': 'booking_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            booking = Booking.objects.get(pk=booking_id, student=request.user, booking_status='pending')
-        except Booking.DoesNotExist:
-            return Response({'error': 'Pending booking not found or already confirmed.'}, status=status.HTTP_404_NOT_FOUND)
-
         if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
             return Response({'error': 'Razorpay gateway is not configured on the server.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        client = get_razorpay_client()
-        amount_in_paise = int(booking.total_amount * 100)
+        from django.db import transaction
 
-        order_params = {
-            'amount': amount_in_paise,
-            'currency': 'INR',
-            'receipt': f"bk_{booking.id}",
-            'notes': {
-                'booking_id': str(booking.id),
-                'student_id': str(request.user.id),
-                'student_email': request.user.email,
-                'subject': booking.subject.name,
+        with transaction.atomic():
+            try:
+                booking = Booking.objects.select_for_update().get(pk=booking_id, student=request.user, booking_status='pending')
+            except Booking.DoesNotExist:
+                return Response({'error': 'Pending booking not found or already confirmed.'}, status=status.HTTP_404_NOT_FOUND)
+
+            # Check 15-minute expiration
+            if booking.expires_at and booking.expires_at < timezone.now():
+                booking.booking_status = 'cancelled'
+                booking.save(update_fields=['booking_status'])
+                cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
+                return Response({'error': 'Your 15-minute slot reservation has expired. Please select your slot again.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Verify no other confirmed booking took these slots
+            teacher_profile = TeacherProfile.objects.select_for_update().get(user=booking.teacher)
+            for s in booking.schedules.all():
+                conflict_sched = BookingSchedule.objects.filter(
+                    booking__teacher=booking.teacher,
+                    booking__booking_status__in=['confirmed', 'completed'],
+                    status='scheduled',
+                    date=s.date,
+                    start_time=s.start_time
+                ).exclude(booking_id=booking.id).exists()
+                conflict_ses = ClassSession.objects.filter(
+                    teacher=booking.teacher,
+                    scheduled_time__date=s.date,
+                    scheduled_time__time=s.start_time
+                ).exclude(status='Cancelled').exists()
+
+                if conflict_sched or conflict_ses:
+                    booking.booking_status = 'cancelled'
+                    booking.save(update_fields=['booking_status'])
+                    cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
+                    return Response({
+                        'error': f"The slot on {s.date.strftime('%b %d')} at {s.start_time.strftime('%I:%M %p')} is already booked by another student. Please select an available slot."
+                    }, status=status.HTTP_409_CONFLICT)
+
+            client = get_razorpay_client()
+            amount_in_paise = int(booking.total_amount * 100)
+
+            order_params = {
+                'amount': amount_in_paise,
+                'currency': 'INR',
+                'receipt': f"bk_{booking.id}",
+                'notes': {
+                    'booking_id': str(booking.id),
+                    'student_id': str(request.user.id),
+                    'student_email': request.user.email,
+                    'subject': booking.subject.name,
+                }
             }
-        }
 
-        try:
-            razorpay_order = client.order.create(data=order_params)
+            try:
+                razorpay_order = client.order.create(data=order_params)
 
-            # Save order ID on booking
-            booking.razorpay_order_id = razorpay_order['id']
-            booking.save(update_fields=['razorpay_order_id'])
+                # Save order ID on booking
+                booking.razorpay_order_id = razorpay_order['id']
+                booking.save(update_fields=['razorpay_order_id'])
 
-            # Log transaction attempt
-            PaymentTransaction.objects.create(
-                booking=booking,
-                user=request.user,
-                razorpay_order_id=razorpay_order['id'],
-                amount=booking.total_amount,
-                currency='INR',
-                status='created',
-                raw_response=razorpay_order
-            )
+                # Log transaction attempt
+                PaymentTransaction.objects.create(
+                    booking=booking,
+                    user=request.user,
+                    razorpay_order_id=razorpay_order['id'],
+                    amount=booking.total_amount,
+                    currency='INR',
+                    status='created',
+                    raw_response=razorpay_order
+                )
 
-            return Response({
-                'order_id': razorpay_order['id'],
-                'amount': razorpay_order['amount'],
-                'currency': razorpay_order['currency'],
-                'key_id': settings.RAZORPAY_KEY_ID,
-                'booking_id': booking.id,
-            }, status=status.HTTP_200_OK)
+                return Response({
+                    'order_id': razorpay_order['id'],
+                    'amount': razorpay_order['amount'],
+                    'currency': razorpay_order['currency'],
+                    'key_id': settings.RAZORPAY_KEY_ID,
+                    'booking_id': booking.id,
+                }, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            logger.error(f"Failed to create Razorpay order for booking {booking.id}: {e}", exc_info=True)
-            return Response({'error': f'Failed to create order: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                logger.error(f"Failed to create Razorpay order for booking {booking.id}: {e}", exc_info=True)
+                return Response({'error': f'Failed to create order: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class VerifyRazorpayPaymentView(APIView):
-    """Verifies HMAC signature from Razorpay checkout and confirms booking."""
+    """Verifies HMAC signature from Razorpay checkout, performs amount integrity check, and confirms booking."""
     permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
 
     def post(self, request):
@@ -476,6 +599,10 @@ class VerifyRazorpayPaymentView(APIView):
         except Booking.DoesNotExist:
             return Response({'error': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+        if booking.razorpay_order_id and booking.razorpay_order_id != razorpay_order_id:
+            logger.warning(f"Order ID mismatch for booking {booking_id}: expected {booking.razorpay_order_id}, got {razorpay_order_id}")
+            return Response({'error': 'Payment verification failed: Order ID mismatch.'}, status=status.HTTP_400_BAD_REQUEST)
+
         client = get_razorpay_client()
         try:
             client.utility.verify_payment_signature({
@@ -487,7 +614,19 @@ class VerifyRazorpayPaymentView(APIView):
             logger.warning(f"Signature verification failed for order {razorpay_order_id}")
             return Response({'error': 'Payment verification failed: Invalid signature.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Idempotent confirmation
+        # Integrity check: fetch payment from Razorpay to verify exact amount & currency
+        try:
+            payment_entity = client.payment.fetch(razorpay_payment_id)
+            expected_paise = int(booking.total_amount * 100)
+            if payment_entity.get('amount') != expected_paise:
+                logger.error(f"Amount tampering detected: Booking {booking_id} expected {expected_paise} paise, paid {payment_entity.get('amount')} paise")
+                return Response({'error': 'Payment amount verification failed: Amount does not match booking total.'}, status=status.HTTP_400_BAD_REQUEST)
+            if payment_entity.get('currency') != 'INR':
+                return Response({'error': 'Invalid payment currency.'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as pe:
+            logger.warning(f"Could not fetch payment entity for extra validation: {pe}")
+
+        # Idempotent & atomic confirmation with double-booking prevention & auto-refund
         booking, newly_confirmed = confirm_booking_payment(
             booking_id=booking.id,
             razorpay_order_id=razorpay_order_id,
@@ -495,6 +634,12 @@ class VerifyRazorpayPaymentView(APIView):
             signature=razorpay_signature,
             raw_data={'verified_via': 'client_callback'}
         )
+
+        if newly_confirmed == 'conflict_refunded':
+            return Response({
+                'error': 'This slot was simultaneously booked by another student before your payment completed. We have cancelled your booking and immediately initiated a full refund to your original payment method.',
+                'status': 'conflict_refunded'
+            }, status=status.HTTP_409_CONFLICT)
 
         return Response({
             'message': 'Payment successfully verified and booking confirmed.',
@@ -1291,3 +1436,77 @@ class AdminSubjectManageView(APIView):
             return Response({'message': 'Subject deleted.'})
         except Subject.DoesNotExist:
             return Response({'error': 'Subject not found.'}, status=404)
+
+
+class TeacherLiveSlotsView(APIView):
+    """
+    Lightweight real-time synchronization endpoint.
+    Used by student booking pages & modals for instant live slot updates without page reloads.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, pk):
+        try:
+            teacher = User.objects.get(pk=pk, role='teacher')
+        except User.DoesNotExist:
+            try:
+                prof = TeacherProfile.objects.get(pk=pk)
+                teacher = prof.user
+            except TeacherProfile.DoesNotExist:
+                return Response({'error': 'Teacher not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        today = dt_date.today()
+        hold_cutoff = timezone.now() - timedelta(minutes=15)
+
+        # Get all future availability slots
+        slots = list(TeacherAvailability.objects.filter(teacher=teacher, date__gte=today).order_by('date', 'start_time'))
+
+        # Confirmed or completed schedules
+        active_schedules = BookingSchedule.objects.filter(
+            booking__teacher=teacher,
+            date__gte=today,
+            booking__booking_status__in=['confirmed', 'completed'],
+            status='scheduled'
+        )
+        booked_times = set((s.date, s.start_time) for s in active_schedules)
+
+        # Active ClassSessions directly
+        active_sessions = ClassSession.objects.filter(
+            teacher=teacher,
+            scheduled_time__date__gte=today
+        ).exclude(status='Cancelled')
+        for ses in active_sessions:
+            booked_times.add((ses.scheduled_time.date(), ses.scheduled_time.time()))
+
+        # Actively held slots (pending booking within 15 min)
+        held_schedules = BookingSchedule.objects.filter(
+            booking__teacher=teacher,
+            date__gte=today,
+            booking__booking_status='pending',
+            booking__created_at__gte=hold_cutoff,
+            status='scheduled'
+        )
+        held_times = set((s.date, s.start_time) for s in held_schedules)
+
+        version = cache.get(f"teacher_slots_v_{pk}") or int(timezone.now().timestamp())
+
+        slot_data = []
+        for s in slots:
+            is_booked = (s.date, s.start_time) in booked_times
+            is_held = ((s.date, s.start_time) in held_times) and not is_booked
+            slot_data.append({
+                'id': s.id,
+                'date': str(s.date),
+                'start_time': str(s.start_time),
+                'end_time': str(s.end_time),
+                'is_booked': is_booked,
+                'is_held': is_held,
+            })
+
+        return Response({
+            'teacher_id': pk,
+            'version': str(version),
+            'server_time': timezone.now().isoformat(),
+            'total_slots': len(slot_data),
+            'slots': slot_data
+        }, status=status.HTTP_200_OK)

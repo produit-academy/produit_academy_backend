@@ -128,6 +128,13 @@ class ClassSession(models.Model):
 
     class Meta:
         ordering = ['-scheduled_time']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['teacher', 'scheduled_time'],
+                condition=~models.Q(status='Cancelled'),
+                name='unique_active_teacher_scheduled_time'
+            )
+        ]
 
     def __str__(self):
         return f"{self.title} ({self.course.name})"
@@ -223,6 +230,7 @@ class Booking(models.Model):
     razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
     razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
 
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Reservation timeout for pending bookings (15 min)")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -373,7 +381,7 @@ class DailyClassVoiceNote(models.Model):
         ('submitted', 'Submitted'),
     ]
 
-    class_session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='voice_notes')
+    class_session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, null=True, blank=True, related_name='voice_notes')
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='daily_voice_notes', limit_choices_to={'role': 'teacher'})
     student = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='student_voice_notes', limit_choices_to={'role': 'student'})
     date = models.DateField(auto_now_add=True)
@@ -387,7 +395,8 @@ class DailyClassVoiceNote(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Voice Note: {self.teacher.username} - {self.class_session.title} ({self.created_at.strftime('%Y-%m-%d')})"
+        title = self.class_session.title if self.class_session else 'General'
+        return f"Voice Note: {self.teacher.username} - {title} ({self.created_at.strftime('%Y-%m-%d')})"
 
 
 class TeacherMonthlyReport(models.Model):

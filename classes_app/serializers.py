@@ -370,10 +370,13 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
         return TeacherDemoVideoSerializer(videos, many=True).data
 
     def get_availability_slots(self, obj):
-        from datetime import date as dt_date
+        from datetime import date as dt_date, timedelta
+        from django.utils import timezone
         today = dt_date.today()
+        hold_cutoff = timezone.now() - timedelta(minutes=15)
+
         # Get all future availability slots
-        slots = list(TeacherAvailability.objects.filter(teacher=obj.user, date__gte=today))
+        slots = list(TeacherAvailability.objects.filter(teacher=obj.user, date__gte=today).order_by('date', 'start_time'))
         
         # Get all future schedules that are part of active/confirmed/completed bookings
         active_schedules = BookingSchedule.objects.filter(
@@ -382,15 +385,34 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
             booking__booking_status__in=['confirmed', 'completed'],
             status='scheduled'
         )
-        
-        # Build a set of (date, start_time) tuples that are already booked
         booked_times = set((s.date, s.start_time) for s in active_schedules)
+
+        # Active ClassSessions directly
+        active_sessions = ClassSession.objects.filter(
+            teacher=obj.user,
+            scheduled_time__date__gte=today
+        ).exclude(status='Cancelled')
+        for ses in active_sessions:
+            booked_times.add((ses.scheduled_time.date(), ses.scheduled_time.time()))
+
+        # Actively held slots (pending booking within 15 min hold)
+        held_schedules = BookingSchedule.objects.filter(
+            booking__teacher=obj.user,
+            date__gte=today,
+            booking__booking_status='pending',
+            booking__created_at__gte=hold_cutoff,
+            status='scheduled'
+        )
+        held_times = set((s.date, s.start_time) for s in held_schedules)
         
-        # Return all slots with an explicit is_booked flag
+        # Return all slots with explicit is_booked and is_held flags
         slot_data = []
         for s in slots:
             data = TeacherAvailabilitySerializer(s).data
-            data['is_booked'] = (s.date, s.start_time) in booked_times
+            is_booked = (s.date, s.start_time) in booked_times
+            is_held = ((s.date, s.start_time) in held_times) and not is_booked
+            data['is_booked'] = is_booked
+            data['is_held'] = is_held
             slot_data.append(data)
         
         return slot_data
@@ -496,22 +518,29 @@ class ClassReportSerializer(serializers.ModelSerializer):
 
 class DailyClassVoiceNoteSerializer(serializers.ModelSerializer):
     teacher_name = serializers.SerializerMethodField()
+    student_name = serializers.SerializerMethodField()
     session_title = serializers.SerializerMethodField()
+    summary = serializers.CharField(source='text_summary', read_only=True)
 
     class Meta:
         model = DailyClassVoiceNote
         fields = [
             'id', 'class_session', 'session_title', 'teacher', 'teacher_name',
-            'student', 'date', 'audio_file', 'text_summary', 'duration_seconds',
-            'status', 'created_at'
+            'student', 'student_name', 'date', 'audio_file', 'text_summary', 'summary',
+            'duration_seconds', 'status', 'created_at'
         ]
         read_only_fields = ['teacher', 'date', 'created_at']
 
     def get_teacher_name(self, obj):
         return f"{obj.teacher.first_name} {obj.teacher.last_name}".strip() or obj.teacher.username
 
+    def get_student_name(self, obj):
+        if obj.student:
+            return f"{obj.student.first_name} {obj.student.last_name}".strip() or obj.student.username
+        return None
+
     def get_session_title(self, obj):
-        return obj.class_session.title
+        return obj.class_session.title if obj.class_session else 'General Daily Audio'
 
 
 class TeacherMonthlyReportSerializer(serializers.ModelSerializer):

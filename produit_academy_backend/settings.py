@@ -171,9 +171,9 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 # --- CLOUDINARY CONFIGURATION ---
 import cloudinary
 CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', 'owr5rccy'),
-    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', '896454794845329'),
-    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', '29vTFcLmQokB9Ute4sqXh1TQQLU'),
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', ''),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', ''),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', ''),
 }
 cloudinary.config(
     cloud_name=CLOUDINARY_STORAGE['CLOUD_NAME'],
@@ -194,7 +194,8 @@ STORAGES = {
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# --- RAZORPAY SETTINGS ---
+# --- RAZORPAY & PAYMENT SETTINGS ---
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
-RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
+RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
+ALLOW_DUMMY_PAYMENT = os.environ.get('ALLOW_DUMMY_PAYMENT', 'False').strip().lower() == 'true'

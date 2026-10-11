@@ -60,6 +60,17 @@ class IsTeacher(permissions.BasePermission):
         )
 
 
+class IsClassesAdmin(permissions.BasePermission):
+    """Ensure user is authenticated and has administrative privileges."""
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user and
+            user.is_authenticated and
+            (user.is_staff or user.is_superuser or getattr(user, 'role', None) in ['admin', 'manager'])
+        )
+
+
 # ============================================================
 # PUBLIC BROWSING ENDPOINTS
 # ============================================================
@@ -212,7 +223,7 @@ class StudentBookTeacherView(APIView):
                 teacher=teacher,
                 booking_status='pending',
                 created_at__lt=hold_cutoff
-            ).update(booking_status='cancelled')
+            ).update(booking_status='expired', payment_status='failed')
 
             # 2. Check confirmed / completed schedules
             active_schedules = BookingSchedule.objects.filter(
@@ -253,12 +264,12 @@ class StudentBookTeacherView(APIView):
                         'reason': 'currently_held'
                     }, status=status.HTTP_409_CONFLICT)
 
-            # Cancel any previous pending booking by THIS student for this teacher
+            # Expire any previous pending booking by THIS student for this teacher
             Booking.objects.filter(
                 student=student,
                 teacher=teacher,
                 booking_status='pending'
-            ).update(booking_status='cancelled')
+            ).update(booking_status='expired', payment_status='failed')
 
             # Calculate derived fields
             slots.sort(key=lambda s: (s.date, s.start_time))
@@ -330,8 +341,8 @@ class DummyPaymentView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
 
     def post(self, request):
-        if not settings.DEBUG and not getattr(settings, 'ALLOW_DUMMY_PAYMENT', False):
-            return Response({'error': 'Dummy payment is disabled in live environment. Please use official Razorpay checkout.'}, status=status.HTTP_403_FORBIDDEN)
+        if not getattr(settings, 'ALLOW_DUMMY_PAYMENT', False):
+            return Response({'error': 'Dummy payment is disabled. Please complete checkout through Razorpay.'}, status=status.HTTP_403_FORBIDDEN)
 
         booking_id = request.data.get('booking_id')
         from django.db import transaction
@@ -508,10 +519,11 @@ class CreateRazorpayOrderView(APIView):
 
             # Check 5-minute expiration
             if booking.expires_at and booking.expires_at < timezone.now():
-                booking.booking_status = 'cancelled'
-                booking.save(update_fields=['booking_status'])
+                booking.booking_status = 'expired'
+                booking.payment_status = 'failed'
+                booking.save(update_fields=['booking_status', 'payment_status'])
                 cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
-                return Response({'error': 'Your 5-minute slot reservation has expired. Please select your slot again.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'Your slot reservation has expired without payment. Please select your slot again.'}, status=status.HTTP_400_BAD_REQUEST)
 
             # Verify no other confirmed booking took these slots
             teacher_profile = TeacherProfile.objects.select_for_update().get(user=booking.teacher)
@@ -733,11 +745,14 @@ class StudentBookingsListView(generics.ListAPIView):
     serializer_class = BookingSerializer
 
     def get_queryset(self):
-        return Booking.objects.filter(student=self.request.user).exclude(
-            booking_status='pending'
+        return Booking.objects.filter(
+            student=self.request.user,
+            payment_status__in=['advance_paid', 'fully_paid', 'refunded']
+        ).exclude(
+            booking_status__in=['pending', 'expired']
         ).select_related(
             'teacher', 'student', 'subject', 'course'
-        ).prefetch_related('schedules')
+        ).prefetch_related('schedules').order_by('-created_at')
 
 
 class StudentPaymentHistoryView(APIView):
@@ -986,11 +1001,14 @@ class TeacherBookingsView(generics.ListAPIView):
     serializer_class = TeacherBookingSerializer
 
     def get_queryset(self):
-        return Booking.objects.filter(teacher=self.request.user).exclude(
-            booking_status='pending'
+        return Booking.objects.filter(
+            teacher=self.request.user,
+            payment_status__in=['advance_paid', 'fully_paid', 'refunded']
+        ).exclude(
+            booking_status__in=['pending', 'expired']
         ).select_related(
             'student', 'subject', 'course'
-        ).prefetch_related('schedules')
+        ).prefetch_related('schedules').order_by('-created_at')
 
 
 class CancelScheduleView(APIView):
@@ -1322,7 +1340,7 @@ def send_student_action_notification(student_email, student_name, action_type, r
 
 class AdminStudentsListView(generics.ListAPIView):
     """View-only list of registered students for admin."""
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def get(self, request):
         students = User.objects.filter(
@@ -1357,7 +1375,7 @@ class AdminStudentActionView(APIView):
     POST /api/classes/admin/students/<pk>/action/
     Body: { "action": "delete"|"hold"|"ban"|"activate", "reason": "optional note" }
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def post(self, request, pk):
         from api.models import Session
@@ -1431,7 +1449,7 @@ class AdminStudentActionView(APIView):
 
 class AdminBookingsListView(generics.ListAPIView):
     """All bookings for admin view."""
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
     serializer_class = BookingSerializer
 
     def get_queryset(self):
@@ -1442,7 +1460,7 @@ class AdminBookingsListView(generics.ListAPIView):
 
 class AdminSubjectManageView(APIView):
     """Admin CRUD for subjects."""
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def get(self, request):
         course_id = request.query_params.get('course_id')

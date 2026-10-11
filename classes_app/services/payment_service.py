@@ -303,9 +303,9 @@ def expire_stale_pending_bookings(teacher_id=None):
     booking_ids = [b.id for b in affected_bookings]
     teacher_ids = set(b.teacher_id for b in affected_bookings)
 
-    # 1. Update bookings to cancelled / failed
+    # 1. Update bookings to expired / failed
     Booking.objects.filter(id__in=booking_ids).update(
-        booking_status='cancelled',
+        booking_status='expired',
         payment_status='failed'
     )
 

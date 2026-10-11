@@ -43,6 +43,17 @@ class IsTeacher(permissions.BasePermission):
 
 
 
+class IsClassesAdmin(permissions.BasePermission):
+    """Ensure user is authenticated and has administrative privileges."""
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user and
+            user.is_authenticated and
+            (user.is_staff or user.is_superuser or getattr(user, 'role', None) in ['admin', 'manager'])
+        )
+
+
 class IsClassesPlatform(permissions.BasePermission):
     """Ensure user belongs to the classes platform (or is admin)."""
     def has_permission(self, request, view):
@@ -652,7 +663,7 @@ class PublicCourseDetailView(generics.RetrieveAPIView):
 
 
 class AdminCourseListCreateView(generics.ListCreateAPIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
     serializer_class = CourseSerializer
 
     def get_queryset(self):
@@ -685,13 +696,13 @@ class AdminCourseListCreateView(generics.ListCreateAPIView):
 
 
 class AdminCourseDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
     queryset = Course.objects.all()
     serializer_class = CourseSerializer
 
 
 class AdminBulkEnrollView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
@@ -810,7 +821,7 @@ class AdminBulkEnrollView(APIView):
 
 
 class AdminStatsView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def get(self, request):
         cache_key = "admin_stats_overview"
@@ -867,7 +878,7 @@ class AdminStatsView(APIView):
 
 
 class AdminEnrollmentListView(generics.ListAPIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
     serializer_class = EnrollmentSerializer
 
     def get_queryset(self):
@@ -899,7 +910,7 @@ class StudentStatsView(APIView):
 # --- Admin Staff Management ---
 
 class AdminStaffManagementView(generics.ListCreateAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -917,6 +928,9 @@ class AdminStaffManagementView(generics.ListCreateAPIView):
 
     def list(self, request, *args, **kwargs):
         """Override list to include subjects with names and permanent Google Meet link for staff."""
+        if not is_classes_staff_or_admin(request.user):
+            raise PermissionDenied("Only administrators can view staff directory.")
+
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
         data = serializer.data
@@ -954,7 +968,7 @@ class AdminStaffManagementView(generics.ListCreateAPIView):
 # --- Admin Assign Staff to Student ---
 
 class AdminAssignStaffView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def post(self, request):
         student_id = request.data.get('student_id')
@@ -992,7 +1006,7 @@ class AdminAssignStaffView(APIView):
 
 
 class AdminStaffDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
     serializer_class = StaffUpdateSerializer
 
     def check_permissions(self, request):
@@ -1010,7 +1024,7 @@ class AdminTeacherMeetLinkView(APIView):
     Synchronizes across the teacher's profile and active/upcoming sessions.
     PATCH/POST /api/classes/admin/teacher/<pk>/meet-link/
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def patch(self, request, pk):
         return self._update_meet_link(request, pk)
@@ -1068,7 +1082,7 @@ class AdminTeacherMeetLinkView(APIView):
 
 
 class AdminStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
     serializer_class = UserUpdateSerializer
 
     def get_queryset(self):
@@ -1076,7 +1090,7 @@ class AdminStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class AdminEnrollmentToggleCompletionView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def post(self, request, pk):
         try:
@@ -1093,7 +1107,7 @@ class AdminEnrollmentToggleCompletionView(APIView):
             return Response({'detail': 'Enrollment not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 class AdminUserAnalyticsView(APIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def get(self, request, pk):
         try:
@@ -1537,7 +1551,7 @@ class AdminClassSessionsListView(APIView):
     Staff / Admin view all class sessions across courses with search and filters.
     Accessible to superusers, admin/manager, and staff with 'classes' module access.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsClassesAdmin]
 
     def get(self, request):
         if not is_classes_staff_or_admin(request.user):
@@ -1586,10 +1600,12 @@ class ClassReportListCreateView(APIView):
             reports = ClassReport.objects.filter(
                 teacher=user
             ).select_related('student', 'class_session').order_by('-created_at')
-        else: # admin / manager
+        elif is_classes_staff_or_admin(user):
             reports = ClassReport.objects.all().select_related(
                 'teacher', 'student', 'class_session'
             ).order_by('-created_at')
+        else:
+            return Response({'error': 'Unauthorized access.'}, status=403)
 
         # Filter by class_session
         session_id = request.query_params.get('class_session')
@@ -1628,7 +1644,9 @@ class ClassReportDetailView(generics.RetrieveUpdateDestroyAPIView):
             return ClassReport.objects.filter(student=user, status__in=['submitted', 'approved'])
         elif user.role == 'teacher':
             return ClassReport.objects.filter(teacher=user)
-        return ClassReport.objects.all()
+        elif is_classes_staff_or_admin(user):
+            return ClassReport.objects.all()
+        return ClassReport.objects.none()
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -1654,8 +1672,10 @@ class DailyVoiceNoteListCreateView(APIView):
             notes = DailyClassVoiceNote.objects.filter(teacher=user)
         elif user.role == 'student':
             notes = DailyClassVoiceNote.objects.filter(student=user)
-        else: # staff, manager, superuser
+        elif is_classes_staff_or_admin(user):
             notes = DailyClassVoiceNote.objects.all()
+        else:
+            return Response({'error': 'Unauthorized access.'}, status=403)
 
         if session_id:
             notes = notes.filter(class_session_id=session_id)
@@ -1684,7 +1704,9 @@ class DailyVoiceNoteListCreateView(APIView):
 
         if session_id:
             try:
-                session = ClassSession.objects.select_related('student').get(pk=session_id)
+                session = ClassSession.objects.select_related('student', 'teacher').get(pk=session_id)
+                if not is_classes_staff_or_admin(request.user) and session.teacher != request.user:
+                    return Response({'error': 'You can only upload voice notes for your own classes.'}, status=403)
                 student = session.student
             except ClassSession.DoesNotExist:
                 return Response({'error': 'ClassSession not found.'}, status=404)
@@ -1717,8 +1739,10 @@ class TeacherMonthlyReportListCreateView(APIView):
         user = request.user
         if user.role == 'teacher':
             reports = TeacherMonthlyReport.objects.filter(teacher=user).order_by('-year', '-month')
-        else:
+        elif is_classes_staff_or_admin(user):
             reports = TeacherMonthlyReport.objects.all().select_related('teacher').order_by('-year', '-month')
+        else:
+            return Response({'error': 'Unauthorized access.'}, status=403)
 
         # Filters
         month = request.query_params.get('month')

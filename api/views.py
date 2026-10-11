@@ -297,8 +297,6 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
     except Exception as e:
         print(f"\n--- EMAIL SENDING FAILED ---")
         print(f"Error: {e}")
-        if otp:
-            print(f"DEBUG OTP for {recipient_email}: {otp}")
         print("----------------------------\n")
 
 # --- AUTHENTICATION & SESSION MANAGEMENT ---
@@ -346,105 +344,242 @@ class SignUpView(generics.CreateAPIView):
         except Exception as e:
             print(f"Email Error: {e}")
 
+# --- OTP RATE LIMITING & SECURITY HELPERS ---
+MAX_OTP_ATTEMPTS = 5
+OTP_COOLDOWN_SECONDS = 60
+
+def _check_otp_rate_limit(prefix, identifier):
+    attempts = cache.get(f"{prefix}_{identifier.lower().strip()}", 0)
+    return attempts >= MAX_OTP_ATTEMPTS, max(0, MAX_OTP_ATTEMPTS - attempts)
+
+def _record_otp_failure(prefix, identifier):
+    key = f"{prefix}_{identifier.lower().strip()}"
+    attempts = cache.get(key, 0) + 1
+    cache.set(key, attempts, timeout=600)  # 10 minutes tracking
+    return attempts
+
+def _clear_otp_rate_limit(prefix, identifier):
+    cache.delete(f"{prefix}_{identifier.lower().strip()}")
+
+def _is_otp_cooldown_active(prefix, identifier):
+    return cache.get(f"{prefix}_{identifier.lower().strip()}") is not None
+
+def _set_otp_cooldown(prefix, identifier):
+    cache.set(f"{prefix}_{identifier.lower().strip()}", True, timeout=OTP_COOLDOWN_SECONDS)
+
+
 class VerifyOTPView(APIView):
     permission_classes = [permissions.AllowAny]
+
     def post(self, request):
-        email = request.data.get('email')
-        otp = request.data.get('otp')
+        email = (request.data.get('email') or '').strip().lower()
+        otp = str(request.data.get('otp') or '').strip()
+
+        if not email or not otp:
+            return Response({'detail': 'Email and verification code are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            user = User.objects.get(email=email)
-            if user.otp == otp and user.otp_expiry > timezone.now():
+            user = User.objects.get(email__iexact=email)
+
+            is_locked, _ = _check_otp_rate_limit("otp_verify_fail", email)
+            if is_locked:
+                user.otp = None
+                user.otp_expiry = None
+                user.save(update_fields=['otp', 'otp_expiry'])
+                return Response({
+                    'detail': 'Too many failed verification attempts. For your security, this code has been revoked. Please request a new verification code.'
+                }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+            if user.otp and user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
                 user.is_active = True
                 user.is_verified = True
                 user.otp = None
-                user.save()
+                user.otp_expiry = None
+                user.save(update_fields=['is_active', 'is_verified', 'otp', 'otp_expiry'])
+                _clear_otp_rate_limit("otp_verify_fail", email)
                 return Response({'detail': 'Verified successfully!'})
-            return Response({'detail': 'Invalid or expired OTP'}, status=status.HTTP_400_BAD_REQUEST)
+
+            attempts = _record_otp_failure("otp_verify_fail", email)
+            if attempts >= MAX_OTP_ATTEMPTS:
+                user.otp = None
+                user.otp_expiry = None
+                user.save(update_fields=['otp', 'otp_expiry'])
+                return Response({
+                    'detail': 'Too many failed attempts. For your security, this code has been revoked. Please request a new verification code.'
+                }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+            remaining = MAX_OTP_ATTEMPTS - attempts
+            return Response({'detail': f'Invalid or expired code. {remaining} attempt(s) remaining.'}, status=status.HTTP_400_BAD_REQUEST)
+
         except User.DoesNotExist:
-            return Response({'detail': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
 
 class VerifyAgreementView(APIView):
     permission_classes = [permissions.AllowAny]
-    
+
     def post(self, request):
-        email = request.data.get('email')
-        otp = request.data.get('otp')
-        
+        email = (request.data.get('email') or '').strip().lower()
+        otp = str(request.data.get('otp') or '').strip()
+
+        if not email or not otp:
+            return Response({'error': 'Email and OTP are required.'}, status=400)
+
         try:
-            user = User.objects.get(email=email, role__in=['teacher'])
-            if user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
+            user = User.objects.get(email__iexact=email, role__in=['teacher'])
+
+            is_locked, _ = _check_otp_rate_limit("agreement_otp_fail", email)
+            if is_locked:
                 user.otp = None
-                user.save()
+                user.otp_expiry = None
+                user.save(update_fields=['otp', 'otp_expiry'])
+                return Response({
+                    'error': 'Too many failed attempts. This code has been revoked. Please contact HR.'
+                }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+            if user.otp and user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
+                user.otp = None
+                user.otp_expiry = None
+                user.save(update_fields=['otp', 'otp_expiry'])
+                _clear_otp_rate_limit("agreement_otp_fail", email)
                 return Response({'message': 'Agreement signed successfully. Pending HR approval.'})
-            return Response({'error': 'Invalid or expired OTP.'}, status=400)
+
+            attempts = _record_otp_failure("agreement_otp_fail", email)
+            if attempts >= MAX_OTP_ATTEMPTS:
+                user.otp = None
+                user.otp_expiry = None
+                user.save(update_fields=['otp', 'otp_expiry'])
+                return Response({
+                    'error': 'Too many failed attempts. This code has been revoked for security.'
+                }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+            remaining = MAX_OTP_ATTEMPTS - attempts
+            return Response({'error': f'Invalid or expired code. {remaining} attempt(s) remaining.'}, status=400)
+
         except User.DoesNotExist:
             return Response({'error': 'User not found.'}, status=404)
 
+
 class ResendOTPView(APIView):
     permission_classes = [permissions.AllowAny]
+
     def post(self, request):
-        email = request.data.get('email')
+        email = (request.data.get('email') or '').strip().lower()
+        if not email:
+            return Response({'detail': 'Email is required.'}, status=400)
+
+        if _is_otp_cooldown_active("otp_resend_cooldown", email):
+            return Response({
+                'detail': f'Please wait {OTP_COOLDOWN_SECONDS} seconds before requesting another verification code.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
             otp = str(random.randint(100000, 999999))
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
-            user.save()
+            user.save(update_fields=['otp', 'otp_expiry'])
+
+            _set_otp_cooldown("otp_resend_cooldown", email)
+            _clear_otp_rate_limit("otp_verify_fail", email)
+
             try:
                 send_html_email('New Verification Code', user.email, user.username, otp, type='resend')
-                return Response({'detail': 'OTP resent successfully'})
+                return Response({'detail': 'OTP resent successfully.'})
             except Exception:
-                return Response({'detail': 'Failed to send email'}, status=500)
+                return Response({'detail': 'Failed to send email. Please try again later.'}, status=500)
         except User.DoesNotExist:
-            return Response({'detail': 'User not found'}, status=404)
+            return Response({'detail': 'User not found.'}, status=404)
+
 
 class ChangePasswordView(generics.UpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = ChangePasswordSerializer
+
     def get_object(self):
         return self.request.user
 
+
 class PasswordResetRequestOTPView(APIView):
     permission_classes = [permissions.AllowAny]
+
     def post(self, request):
-        email = (request.data.get('email') or '').strip()
+        email = (request.data.get('email') or '').strip().lower()
         if not email:
-            return Response({'detail': 'Email is required'}, status=400)
+            return Response({'detail': 'Email is required.'}, status=400)
+
+        if _is_otp_cooldown_active("pwd_reset_cooldown", email):
+            return Response({
+                'detail': f'Please wait {OTP_COOLDOWN_SECONDS} seconds before requesting another reset code.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
         try:
             user = User.objects.filter(email__iexact=email).first()
             if not user:
-                return Response({'detail': 'User not found'}, status=404)
+                return Response({'detail': 'User not found.'}, status=404)
+
             otp = str(random.randint(100000, 999999))
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
-            user.save()
+            user.save(update_fields=['otp', 'otp_expiry'])
+
+            _set_otp_cooldown("pwd_reset_cooldown", email)
+            _clear_otp_rate_limit("pwd_reset_fail", email)
+
             try:
                 send_html_email('Password Reset Request', user.email, user.username, otp, type='reset')
-                return Response({'detail': 'OTP sent'})
+                return Response({'detail': 'Password reset verification code sent to your email.'})
             except Exception:
-                return Response({'detail': 'Failed to send email'}, status=500)
+                return Response({'detail': 'Failed to send email. Please try again later.'}, status=500)
         except Exception as e:
             return Response({'detail': str(e)}, status=500)
 
+
 class PasswordResetConfirmView(APIView):
     permission_classes = [permissions.AllowAny]
+
     def post(self, request):
-        email = (request.data.get('email') or '').strip()
+        email = (request.data.get('email') or '').strip().lower()
         otp = str(request.data.get('otp') or '').strip()
-        password = request.data.get('password')
+        password = (request.data.get('password') or '').strip()
+
         if not email or not otp or not password:
-            return Response({'detail': 'Email, OTP, and new password are required'}, status=400)
+            return Response({'detail': 'Email, verification code, and new password are required.'}, status=400)
+
+        if len(password) < 8:
+            return Response({'detail': 'New password must be at least 8 characters long.'}, status=400)
+
+        is_locked, _ = _check_otp_rate_limit("pwd_reset_fail", email)
+        if is_locked:
+            return Response({
+                'detail': 'Too many failed reset attempts. For your security, this reset code has been revoked. Please request a new password reset.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
         try:
             user = User.objects.filter(email__iexact=email).first()
             if not user:
-                return Response({'detail': 'User not found'}, status=404)
-            if user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
+                return Response({'detail': 'User not found.'}, status=404)
+
+            if user.otp and user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
                 user.set_password(password)
                 user.otp = None
                 user.otp_expiry = None
-                user.save()
-                return Response({'detail': 'Password reset successful'})
-            return Response({'detail': 'Invalid or expired OTP'}, status=400)
+                user.save(update_fields=['password', 'otp', 'otp_expiry'])
+                _clear_otp_rate_limit("pwd_reset_fail", email)
+                return Response({'detail': 'Password reset successfully. You may now log in with your new password.'})
+
+            attempts = _record_otp_failure("pwd_reset_fail", email)
+            if attempts >= MAX_OTP_ATTEMPTS:
+                user.otp = None
+                user.otp_expiry = None
+                user.save(update_fields=['otp', 'otp_expiry'])
+                return Response({
+                    'detail': 'Too many failed reset attempts. For your security, this reset code has been revoked. Please request a new password reset.'
+                }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+            remaining = MAX_OTP_ATTEMPTS - attempts
+            return Response({'detail': f'Invalid or expired code. {remaining} attempt(s) remaining.'}, status=400)
+
         except Exception as e:
             return Response({'detail': str(e)}, status=500)
 

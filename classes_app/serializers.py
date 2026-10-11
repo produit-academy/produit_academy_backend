@@ -469,6 +469,44 @@ class BookingSerializer(serializers.ModelSerializer):
         return f"{obj.teacher.first_name} {obj.teacher.last_name}".strip() or obj.teacher.username
 
 
+class TeacherBookingSerializer(serializers.ModelSerializer):
+    """
+    Teacher-facing booking serializer:
+    Strictly conceals all student billing details (platform fee, student total amount,
+    advance amount, remaining amount, gateway references).
+    Exposes only the official compensation rate and earnings allotted by HR/Admin.
+    """
+    student_name = serializers.SerializerMethodField()
+    student_email = serializers.EmailField(source='student.email', read_only=True)
+    student_phone = serializers.CharField(source='student.phone_number', read_only=True)
+    subject_name = serializers.CharField(source='subject.name', read_only=True)
+    course_name = serializers.CharField(source='course.name', read_only=True)
+    schedules = BookingScheduleSerializer(many=True, read_only=True)
+    allotted_rate_per_class = serializers.DecimalField(
+        source='teacher_fee_per_class', max_digits=8, decimal_places=2, read_only=True
+    )
+    total_allotted_earnings = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Booking
+        fields = [
+            'id', 'student', 'student_name', 'student_email', 'student_phone',
+            'subject', 'subject_name', 'course', 'course_name',
+            'start_date', 'end_date', 'preferred_time', 'num_classes',
+            'allotted_rate_per_class', 'total_allotted_earnings',
+            'booking_status', 'google_meet_link',
+            'schedules', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_student_name(self, obj):
+        return f"{obj.student.first_name} {obj.student.last_name}".strip() or obj.student.username
+
+    def get_total_allotted_earnings(self, obj):
+        rate = obj.teacher_fee_per_class or 0
+        return float(rate * obj.num_classes)
+
+
 class BookingCreateSerializer(serializers.Serializer):
     teacher_id = serializers.IntegerField()
     subject_id = serializers.IntegerField()

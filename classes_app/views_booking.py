@@ -36,7 +36,7 @@ def get_razorpay_client():
 from .serializers import (
     SubjectSerializer, TeacherProfileCardSerializer,
     TeacherProfileDetailSerializer, TeacherDemoVideoSerializer,
-    BookingSerializer, BookingCreateSerializer, BookingScheduleSerializer,
+    BookingSerializer, TeacherBookingSerializer, BookingCreateSerializer, BookingScheduleSerializer,
     TeacherAvailabilitySerializer,
 )
 
@@ -953,9 +953,9 @@ class TeacherDemoVideoManageView(APIView):
 
 
 class TeacherBookingsView(generics.ListAPIView):
-    """List all bookings for the authenticated teacher."""
+    """List all bookings for the authenticated teacher, strictly hiding student fees."""
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
-    serializer_class = BookingSerializer
+    serializer_class = TeacherBookingSerializer
 
     def get_queryset(self):
         return Booking.objects.filter(teacher=self.request.user).exclude(

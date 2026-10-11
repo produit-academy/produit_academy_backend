@@ -251,14 +251,39 @@ class StaffCreateSerializer(serializers.ModelSerializer):
         return user
 
 class StaffUpdateSerializer(serializers.ModelSerializer):
+    google_meet_link = serializers.CharField(required=False, allow_blank=True, write_only=True)
+
     class Meta:
         model = User
-        fields = ['first_name', 'last_name', 'email', 'role']
+        fields = ['first_name', 'last_name', 'email', 'role', 'google_meet_link']
 
     def validate_role(self, value):
         if value != 'teacher':
             raise serializers.ValidationError("Role must be 'teacher'.")
         return value
+
+    def update(self, instance, validated_data):
+        meet_link = validated_data.pop('google_meet_link', None)
+        user = super().update(instance, validated_data)
+        if meet_link is not None:
+            from .models import TeacherProfile, Booking, ClassSession
+            profile, _ = TeacherProfile.objects.get_or_create(user=user)
+            clean_link = meet_link.strip()
+            if clean_link and not (clean_link.startswith('http://') or clean_link.startswith('https://')):
+                clean_link = f"https://{clean_link}"
+            profile.google_meet_link = clean_link
+            profile.save(update_fields=['google_meet_link'])
+
+            if clean_link:
+                Booking.objects.filter(
+                    teacher=user,
+                    booking_status__in=['pending', 'confirmed']
+                ).update(google_meet_link=clean_link)
+                ClassSession.objects.filter(
+                    teacher=user,
+                    status='Scheduled'
+                ).update(meeting_link=clean_link)
+        return user
 
 class UserUpdateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -294,7 +319,7 @@ class TeacherProfileCardSerializer(serializers.ModelSerializer):
         model = TeacherProfile
         fields = [
             'id', 'user_id', 'name', 'bio', 'qualification', 'experience',
-            'profile_picture_url', 'subject_name', 'hourly_rate',
+            'profile_picture_url', 'profile_picture_base64', 'subject_name', 'hourly_rate',
             'availability_status', 'google_meet_link',
         ]
 
@@ -365,6 +390,15 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
             return obj.profile_picture.url
         return None
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if request and hasattr(request, 'user') and request.user.is_authenticated:
+            # If the teacher themselves is accessing their profile, conceal hourly_rate
+            if getattr(request.user, 'role', '') == 'teacher' and request.user.id == instance.user.id:
+                data.pop('hourly_rate', None)
+        return data
+
     def get_demo_videos(self, obj):
         videos = TeacherDemoVideo.objects.filter(teacher=obj.user)
         return TeacherDemoVideoSerializer(videos, many=True).data
@@ -373,7 +407,7 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
         from datetime import date as dt_date, timedelta
         from django.utils import timezone
         today = dt_date.today()
-        hold_cutoff = timezone.now() - timedelta(minutes=15)
+        hold_cutoff = timezone.now() - timedelta(minutes=5)
 
         # Get all future availability slots
         slots = list(TeacherAvailability.objects.filter(teacher=obj.user, date__gte=today).order_by('date', 'start_time'))
@@ -472,9 +506,8 @@ class BookingSerializer(serializers.ModelSerializer):
 class TeacherBookingSerializer(serializers.ModelSerializer):
     """
     Teacher-facing booking serializer:
-    Strictly conceals all student billing details (platform fee, student total amount,
-    advance amount, remaining amount, gateway references).
-    Exposes only the official compensation rate and earnings allotted by HR/Admin.
+    Strictly conceals all billing, fee, and compensation details.
+    Exposes only academic coordination details (student, subject, schedules, meet link).
     """
     student_name = serializers.SerializerMethodField()
     student_email = serializers.EmailField(source='student.email', read_only=True)
@@ -482,10 +515,6 @@ class TeacherBookingSerializer(serializers.ModelSerializer):
     subject_name = serializers.CharField(source='subject.name', read_only=True)
     course_name = serializers.CharField(source='course.name', read_only=True)
     schedules = BookingScheduleSerializer(many=True, read_only=True)
-    allotted_rate_per_class = serializers.DecimalField(
-        source='teacher_fee_per_class', max_digits=8, decimal_places=2, read_only=True
-    )
-    total_allotted_earnings = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -493,7 +522,6 @@ class TeacherBookingSerializer(serializers.ModelSerializer):
             'id', 'student', 'student_name', 'student_email', 'student_phone',
             'subject', 'subject_name', 'course', 'course_name',
             'start_date', 'end_date', 'preferred_time', 'num_classes',
-            'allotted_rate_per_class', 'total_allotted_earnings',
             'booking_status', 'google_meet_link',
             'schedules', 'created_at',
         ]
@@ -501,10 +529,6 @@ class TeacherBookingSerializer(serializers.ModelSerializer):
 
     def get_student_name(self, obj):
         return f"{obj.student.first_name} {obj.student.last_name}".strip() or obj.student.username
-
-    def get_total_allotted_earnings(self, obj):
-        rate = obj.teacher_fee_per_class or 0
-        return float(rate * obj.num_classes)
 
 
 class BookingCreateSerializer(serializers.Serializer):

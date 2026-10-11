@@ -26,7 +26,10 @@ from .models import (
     TeacherDemoVideo, Booking, BookingSchedule, ClassSession,
     Enrollment, EmailLog, PLATFORM_FEE, PaymentTransaction,
 )
-from .services.payment_service import confirm_booking_payment, recheck_razorpay_payment, reconcile_payment
+from .services.payment_service import (
+    confirm_booking_payment, recheck_razorpay_payment,
+    reconcile_payment, expire_stale_pending_bookings
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,8 +206,8 @@ class StudentBookTeacherView(APIView):
                 if slot.date < dt_date.today():
                     return Response({'error': 'Cannot book slots in the past.'}, status=400)
 
-            # 1. Clean up expired pending bookings (> 15 minutes hold)
-            hold_cutoff = timezone.now() - timedelta(minutes=15)
+            # 1. Clean up expired pending bookings (> 5 minutes hold)
+            hold_cutoff = timezone.now() - timedelta(minutes=5)
             Booking.objects.filter(
                 teacher=teacher,
                 booking_status='pending',
@@ -264,14 +267,14 @@ class StudentBookTeacherView(APIView):
             preferred_time = slots[0].start_time
             num_classes = len(slots)
 
-            # Calculate fees
+            # Calculate fees (no platform fee)
             teacher_fee = profile.hourly_rate
             total_teacher_fee = teacher_fee * num_classes
-            platform_fee = Decimal(str(PLATFORM_FEE))
-            total_amount = total_teacher_fee + platform_fee
-            advance_amount = total_amount
-            remaining_amount = Decimal('0.00')
-            expires_at = timezone.now() + timedelta(minutes=15)
+            platform_fee = Decimal('0.00')
+            total_amount = total_teacher_fee
+            advance_amount = Decimal('0.00')  # 0 until payment is confirmed
+            remaining_amount = total_amount   # full amount remains until paid
+            expires_at = timezone.now() + timedelta(minutes=5)
 
             booking = Booking.objects.create(
                 student=student,
@@ -370,6 +373,8 @@ class DummyPaymentView(APIView):
             # Update booking status
             booking.payment_status = 'advance_paid'
             booking.booking_status = 'confirmed'
+            booking.advance_amount = booking.total_amount
+            booking.remaining_amount = Decimal('0.00')
             booking.save()
 
             # Auto-create enrollment if not exists
@@ -441,12 +446,9 @@ class DummyPaymentView(APIView):
             f"Class: {booking.course.name}\n"
             f"Number of Classes: {booking.num_classes}\n"
             f"Schedule:\n{schedule_text}\n\n"
-            f"Fee Breakdown:\n"
-            f"  Teacher Fee: ₹{booking.teacher_fee_per_class}/class × {booking.num_classes} = ₹{booking.teacher_fee_per_class * booking.num_classes}\n"
-            f"  Platform Fee: ₹{booking.platform_fee}\n"
-            f"  Total: ₹{booking.total_amount}\n"
-            f"  Advance Paid: ₹{booking.advance_amount}\n"
-            f"  Remaining: ₹{booking.remaining_amount}\n\n"
+            f"Fee Details:\n"
+            f"  Class Fee: ₹{booking.teacher_fee_per_class}/class × {booking.num_classes} = ₹{booking.total_amount}\n"
+            f"  Total Amount Paid: ₹{booking.advance_amount}\n\n"
             f"Google Meet Link: {booking.google_meet_link or 'Will be shared soon'}\n\n"
             f"Best regards,\nProduit Academy Team"
         )
@@ -504,12 +506,12 @@ class CreateRazorpayOrderView(APIView):
             except Booking.DoesNotExist:
                 return Response({'error': 'Pending booking not found or already confirmed.'}, status=status.HTTP_404_NOT_FOUND)
 
-            # Check 15-minute expiration
+            # Check 5-minute expiration
             if booking.expires_at and booking.expires_at < timezone.now():
                 booking.booking_status = 'cancelled'
                 booking.save(update_fields=['booking_status'])
                 cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
-                return Response({'error': 'Your 15-minute slot reservation has expired. Please select your slot again.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'Your 5-minute slot reservation has expired. Please select your slot again.'}, status=status.HTTP_400_BAD_REQUEST)
 
             # Verify no other confirmed booking took these slots
             teacher_profile = TeacherProfile.objects.select_for_update().get(user=booking.teacher)
@@ -764,13 +766,14 @@ class StudentPaymentHistoryView(APIView):
             else:
                 display_status = 'Pending'
 
+            is_paid = b.payment_status in ['advance_paid', 'fully_paid']
             data.append({
                 'id': b.id,
                 'subject': b.subject.name,
                 'teacher': f"{b.teacher.first_name} {b.teacher.last_name}".strip() or b.teacher.username,
                 'total_amount': float(b.total_amount),
-                'advance_paid': float(b.advance_amount),
-                'remaining': float(b.remaining_amount),
+                'advance_paid': float(b.advance_amount if is_paid else 0.0),
+                'remaining': float(b.remaining_amount if is_paid else b.total_amount),
                 'payment_status': b.payment_status,
                 'display_status': display_status,
                 'booking_status': b.booking_status,
@@ -807,6 +810,9 @@ class AdminPaymentListView(APIView):
     permission_classes = [HasFinanceAccess]
 
     def get(self, request):
+        # Automatically sweep any pending bookings whose 5-minute checkout window has elapsed
+        expire_stale_pending_bookings()
+
         bookings = Booking.objects.all().select_related('student', 'teacher', 'subject', 'course').order_by('-created_at')
         
         # Filters
@@ -815,9 +821,9 @@ class AdminPaymentListView(APIView):
             if status_filter == 'paid':
                 bookings = bookings.filter(payment_status__in=['advance_paid', 'fully_paid'])
             elif status_filter == 'pending':
-                bookings = bookings.filter(payment_status='pending')
-            elif status_filter == 'cancelled':
-                bookings = bookings.filter(booking_status='cancelled')
+                bookings = bookings.filter(payment_status='pending', booking_status='pending')
+            elif status_filter in ['failed', 'expired', 'cancelled']:
+                bookings = bookings.filter(Q(payment_status='failed') | Q(booking_status='cancelled'))
 
         search = request.query_params.get('search', '').strip()
         if search:
@@ -834,21 +840,29 @@ class AdminPaymentListView(APIView):
         for tx in PaymentTransaction.objects.filter(booking__in=bookings[:200]):
             tx_map[tx.booking_id] = tx
 
+        now = timezone.now()
         data = []
         for b in bookings[:100]:
             tx = tx_map.get(b.id)
+            is_paid = b.payment_status in ['advance_paid', 'fully_paid']
+            is_expired = bool(b.expires_at and b.expires_at < now and b.payment_status == 'pending')
+            
             data.append({
                 'id': b.id,
                 'student_name': f"{b.student.first_name} {b.student.last_name}".strip() or b.student.username,
                 'student_email': b.student.email,
                 'teacher_name': f"{b.teacher.first_name} {b.teacher.last_name}".strip() or b.teacher.username,
                 'subject': b.subject.name,
-                'course': b.course.name,
+                'course': b.course.name if b.course else '',
+                'course_name': b.course.name if b.course else '',
                 'total_amount': float(b.total_amount),
-                'advance_amount': float(b.advance_amount),
-                'remaining_amount': float(b.remaining_amount),
+                'amount': float(b.total_amount),
+                'advance_amount': float(b.advance_amount if is_paid else 0.0),
+                'remaining_amount': float(b.remaining_amount if is_paid else b.total_amount),
                 'payment_status': b.payment_status,
                 'booking_status': b.booking_status,
+                'is_expired': is_expired,
+                'expires_at': b.expires_at.isoformat() if b.expires_at else None,
                 'razorpay_order_id': b.razorpay_order_id or '',
                 'razorpay_payment_id': b.razorpay_payment_id or '',
                 'gateway_status': tx.status if tx else 'uninitiated',
@@ -856,6 +870,19 @@ class AdminPaymentListView(APIView):
             })
 
         return Response(data)
+
+
+class AdminClearExpiredPaymentsView(APIView):
+    """Admin manually sweeps and frees all stale reservations older than 5 minutes."""
+    permission_classes = [HasFinanceAccess]
+
+    def post(self, request):
+        cleared_count = expire_stale_pending_bookings()
+        return Response({
+            'success': True,
+            'cleared_count': cleared_count,
+            'message': f"Cleaned up {cleared_count} expired pending reservations. All slots freed."
+        })
 
 
 class AdminPaymentRecheckView(APIView):
@@ -901,8 +928,9 @@ class TeacherProfileManageView(APIView):
 
     def patch(self, request):
         profile, _ = TeacherProfile.objects.get_or_create(user=request.user)
+        # Google Meet link is managed strictly by Classes Administration/HR, not by teachers
         allowed = ['bio', 'qualification', 'experience', 'skills', 'certifications',
-                    'languages', 'teaching_style', 'google_meet_link', 'profile_picture_base64']
+                    'languages', 'teaching_style', 'profile_picture_base64']
         for field in allowed:
             if field in request.data:
                 setattr(profile, field, request.data[field])
@@ -1455,8 +1483,11 @@ class TeacherLiveSlotsView(APIView):
             except TeacherProfile.DoesNotExist:
                 return Response({'error': 'Teacher not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Clear any expired pending holds for this teacher
+        expire_stale_pending_bookings(teacher_id=teacher.id)
+
         today = dt_date.today()
-        hold_cutoff = timezone.now() - timedelta(minutes=15)
+        hold_cutoff = timezone.now() - timedelta(minutes=5)
 
         # Get all future availability slots
         slots = list(TeacherAvailability.objects.filter(teacher=teacher, date__gte=today).order_by('date', 'start_time'))

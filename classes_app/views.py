@@ -116,24 +116,29 @@ class StudentDashboardView(APIView):
         upcoming = ClassSession.objects.filter(
             student=user,
             status__in=['Scheduled', 'Live', 'Needs Review']
-        ).distinct().order_by('scheduled_time')[:15]
+        ).select_related('course', 'teacher').distinct().order_by('scheduled_time')[:15]
 
         # Completed demos awaiting student acceptance
         completed_demos = ClassSession.objects.filter(
             student=user, is_demo=True, status='Completed', demo_outcome='Pending'
-        ).order_by('-scheduled_time')[:5]
+        ).select_related('course', 'teacher').order_by('-scheduled_time')[:5]
 
         # Published reports for this student
         reports = ClassReport.objects.filter(
             student=user, status__in=['submitted', 'approved']
         ).select_related('teacher', 'class_session').order_by('-created_at')[:10]
 
-        # Attendance stats
-        records = AttendanceRecord.objects.filter(student=user)
-        total = records.count()
-        present = records.filter(status='Present').count()
-        absent = records.filter(status='Absent').count()
-        late = records.filter(status='Late').count()
+        # Attendance stats in 1 aggregated query
+        att_stats = AttendanceRecord.objects.filter(student=user).aggregate(
+            total=Count('id'),
+            present=Count('id', filter=Q(status='Present')),
+            absent=Count('id', filter=Q(status='Absent')),
+            late=Count('id', filter=Q(status='Late')),
+        )
+        total = att_stats['total'] or 0
+        present = att_stats['present'] or 0
+        absent = att_stats['absent'] or 0
+        late = att_stats['late'] or 0
         pct = round((present + late) / total * 100, 1) if total > 0 else 100.0
 
         # Per-course teacher info from enrollments
@@ -163,8 +168,59 @@ class StudentDashboardView(APIView):
             'attendance_percentage': pct,
             'courses': CourseSerializer(courses, many=True).data,
             'assigned_teachers': teachers_info,
+            'student_profile': {
+                'current_class': user.current_class or (courses.first().name if courses.exists() else ''),
+                'school_name': user.school_name or '',
+                'address': user.address or '',
+                'phone_number': user.phone_number or '',
+            }
         }
         return Response(data)
+
+
+class StudentChangeClassView(APIView):
+    """Allows a student to select or switch their enrolled class / course at any time, and update school details."""
+    permission_classes = [permissions.IsAuthenticated, IsClassesPlatform]
+
+    def post(self, request):
+        user = request.user
+        if user.role != 'student':
+            return Response({'error': 'Only students can change classes.'}, status=403)
+
+        course_id = request.data.get('course_id')
+        if not course_id:
+            return Response({'error': 'Please select a class / course.'}, status=400)
+
+        try:
+            course = Course.objects.get(id=course_id, is_active=True)
+        except Course.DoesNotExist:
+            return Response({'error': 'Selected course was not found.'}, status=404)
+
+        school_name = request.data.get('school_name')
+        if school_name is not None and str(school_name).strip():
+            user.school_name = str(school_name).strip()
+
+        address = request.data.get('address')
+        if address is not None and str(address).strip():
+            user.address = str(address).strip()
+
+        user.current_class = course.name
+        user.save()
+
+        # Ensure student is enrolled in the newly selected course
+        enrollment, _ = Enrollment.objects.get_or_create(student=user, course=course)
+
+        return Response({
+            'message': f'Successfully updated your class to {course.name}!',
+            'course': {
+                'id': course.id,
+                'name': course.name,
+                'description': course.description,
+            },
+            'current_class': user.current_class,
+            'school_name': user.school_name,
+            'address': user.address,
+        })
 
 # --- Teacher Dashboard ---
 
@@ -230,54 +286,164 @@ class TeacherDashboardView(APIView):
         ).aggregate(total=Sum('duration_minutes'))['total'] or 0
         total_hours = round(total_minutes / 60, 1)
 
-        hourly_rate = 0
-        try:
-            hourly_rate = float(user.classes_teacher_profile.hourly_rate)
-        except:
-            pass
-        total_earnings = round(total_hours * hourly_rate, 2)
+        # Batch query attendance and enrollments for all assigned students (2 queries instead of 3 * N queries)
+        student_ids = [s.id for s in assigned_students]
+        
+        att_counts = AttendanceRecord.objects.filter(
+            student_id__in=student_ids
+        ).values('student_id').annotate(
+            total=Count('id'),
+            attended=Count('id', filter=Q(status__in=['Present', 'Late']))
+        )
+        att_map = {a['student_id']: (a['total'], a['attended']) for a in att_counts}
 
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_minutes = ClassSession.objects.filter(
-            teacher=user, status='Completed', scheduled_time__gte=month_start
-        ).aggregate(total=Sum('duration_minutes'))['total'] or 0
-        this_month_earnings = round((month_minutes / 60) * hourly_rate, 2)
+        enrollments = Enrollment.objects.filter(
+            student_id__in=student_ids, teacher=user
+        ).select_related('course')
+        enroll_map = {}
+        for e in enrollments:
+            enroll_map.setdefault(e.student_id, []).append((e.course.name, e.course.id))
 
-        # Student info for the list, including which courses they share with this teacher
         students_data = []
         for student in assigned_students:
-            records = AttendanceRecord.objects.filter(student=student)
-            total_records = records.count()
-            attended = records.filter(status__in=['Present', 'Late']).count()
+            total_records, attended = att_map.get(student.id, (0, 0))
             pct = round(attended / total_records * 100, 1) if total_records > 0 else 100.0
-            # Courses this teacher teaches this student (names + IDs)
-            student_enrollments = Enrollment.objects.filter(
-                student=student, teacher=user
-            ).select_related('course')
-            student_courses = [e.course.name for e in student_enrollments]
-            student_course_ids = [e.course.id for e in student_enrollments]
+            shared_courses = enroll_map.get(student.id, [])
             students_data.append({
                 'id': student.id,
                 'first_name': student.first_name,
                 'last_name': student.last_name,
                 'email': student.email,
                 'attendance_percentage': pct,
-                'courses': student_courses,
-                'course_ids': student_course_ids,
+                'courses': [c[0] for c in shared_courses],
+                'course_ids': [c[1] for c in shared_courses],
             })
 
         data = {
             'upcoming_classes': ClassSessionSerializer(upcoming, many=True).data,
             'pending_attendance': ClassSessionSerializer(pending, many=True).data,
             'total_classes_held': total_held,
+            'classes_conducted': total_held,
             'total_hours_worked': total_hours,
-            'hourly_rate': hourly_rate,
-            'total_earnings': total_earnings,
-            'this_month_earnings': this_month_earnings,
             'total_students': assigned_students.count(),
             'courses': CourseSerializer(courses, many=True).data,
             'assigned_subjects': assigned_subjects,
             'assigned_students': students_data,
+            'google_meet_link': getattr(teacher_profile, 'google_meet_link', '') or '',
+        }
+        return Response(data)
+
+
+# --- Teacher Class Analysis ---
+
+class TeacherClassAnalysisView(APIView):
+    """
+    Detailed class analysis, session breakdown, and faculty metrics.
+    GET /api/classes/teacher/class-analysis/
+    """
+    permission_classes = [permissions.IsAuthenticated, IsTeacher]
+
+    def get(self, request):
+        user = request.user
+        now = timezone.now()
+
+        all_sessions = ClassSession.objects.filter(teacher=user).select_related('course', 'student').order_by('-scheduled_time')
+        filtered_sessions = all_sessions
+
+        # Course filter
+        course_id = request.query_params.get('course_id')
+        if course_id:
+            filtered_sessions = filtered_sessions.filter(course_id=course_id)
+
+        # Status filter
+        status_param = request.query_params.get('status')
+        if status_param and status_param != 'All':
+            if status_param == 'Needs Review':
+                filtered_sessions = filtered_sessions.filter(
+                    Q(status__in=['Scheduled', 'Needs Review']) & Q(scheduled_time__lt=now - timedelta(minutes=60))
+                )
+            elif status_param == 'Upcoming':
+                filtered_sessions = filtered_sessions.filter(
+                    status='Scheduled', scheduled_time__gte=now
+                )
+            else:
+                filtered_sessions = filtered_sessions.filter(status=status_param)
+
+        # Search filter
+        search = request.query_params.get('search', '').strip()
+        if search:
+            filtered_sessions = filtered_sessions.filter(
+                Q(title__icontains=search) |
+                Q(course__name__icontains=search) |
+                Q(student__first_name__icontains=search) |
+                Q(student__last_name__icontains=search) |
+                Q(student__email__icontains=search)
+            )
+
+        # Aggregated metrics across all sessions
+        total_classes = all_sessions.count()
+        completed_classes = all_sessions.filter(status='Completed').count()
+        upcoming_classes = all_sessions.filter(status='Scheduled', scheduled_time__gte=now).count()
+        not_conducted_classes = all_sessions.filter(status='Not Conducted').count()
+        cancelled_classes = all_sessions.filter(status='Cancelled').count()
+        needs_review_classes = all_sessions.filter(
+            Q(status__in=['Scheduled', 'Needs Review']) & Q(scheduled_time__lt=now - timedelta(minutes=60))
+        ).count()
+
+        total_minutes = all_sessions.filter(status='Completed').aggregate(total=Sum('duration_minutes'))['total'] or 0
+        total_hours = round(total_minutes / 60, 1)
+
+        concluded = completed_classes + not_conducted_classes + cancelled_classes
+        completion_rate = round((completed_classes / concluded * 100) if concluded > 0 else (100.0 if completed_classes > 0 else 0), 1)
+
+        att_qs = AttendanceRecord.objects.filter(class_session__teacher=user)
+        total_att = att_qs.count()
+        present_att = att_qs.filter(status='Present').count()
+        avg_attendance_rate = round((present_att / total_att * 100) if total_att > 0 else (100.0 if completed_classes > 0 else 0), 1)
+
+        # Course distribution
+        course_breakdown = []
+        courses_taught = Course.objects.filter(sessions__teacher=user).distinct()
+        for c in courses_taught:
+            c_sessions = all_sessions.filter(course=c)
+            c_completed = c_sessions.filter(status='Completed')
+            c_mins = c_completed.aggregate(total=Sum('duration_minutes'))['total'] or 0
+            course_breakdown.append({
+                'course_id': c.id,
+                'course_name': c.name,
+                'total_classes': c_sessions.count(),
+                'completed_classes': c_completed.count(),
+                'hours_taught': round(c_mins / 60, 1),
+            })
+
+        # Serialized session list (up to 150)
+        serialized_sessions = ClassSessionSerializer(filtered_sessions[:150], many=True).data
+
+        # Map attendance records
+        session_ids = [s['id'] for s in serialized_sessions]
+        attendance_map = {}
+        for att in AttendanceRecord.objects.filter(class_session_id__in=session_ids):
+            attendance_map[att.class_session_id] = att.status
+
+        for s in serialized_sessions:
+            s['student_attendance'] = attendance_map.get(s['id'], 'Pending' if s.get('effective_status') in ['Scheduled', 'Live'] else 'Not Marked')
+
+        data = {
+            'summary': {
+                'total_classes': total_classes,
+                'completed_classes': completed_classes,
+                'upcoming_classes': upcoming_classes,
+                'needs_review_classes': needs_review_classes,
+                'not_conducted_classes': not_conducted_classes,
+                'cancelled_classes': cancelled_classes,
+                'completion_rate': completion_rate,
+                'total_hours': total_hours,
+                'total_minutes': total_minutes,
+                'attendance_rate': avg_attendance_rate,
+            },
+            'courses': CourseSerializer(courses_taught, many=True).data,
+            'course_breakdown': course_breakdown,
+            'sessions': serialized_sessions,
         }
         return Response(data)
 
@@ -296,7 +462,14 @@ class SessionCreateView(APIView):
         course_id = request.data.get('course')
         scheduled_time = request.data.get('scheduled_time')
         duration_minutes = int(request.data.get('duration_minutes', 60))
-        meeting_link = request.data.get('meeting_link', '')
+        meeting_link = request.data.get('meeting_link', '').strip()
+        if not meeting_link:
+            try:
+                t_prof = teacher.classes_teacher_profile
+                if t_prof and t_prof.google_meet_link:
+                    meeting_link = t_prof.google_meet_link
+            except Exception:
+                pass
         session_title = request.data.get('session_title', '')
 
         if not student_id or not course_id or not scheduled_time:
@@ -640,6 +813,11 @@ class AdminStatsView(APIView):
     permission_classes = [permissions.IsAdminUser]
 
     def get(self, request):
+        cache_key = "admin_stats_overview"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+
         now = timezone.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -674,7 +852,7 @@ class AdminStatsView(APIView):
         total_revenue = confirmed_bookings.aggregate(total=Sum('advance_amount'))['total'] or 0
         total_bookings = Booking.objects.count()
 
-        return Response({
+        res_data = {
             'total_students': total_students,
             'total_teachers': total_teachers,
             'total_courses': total_courses,
@@ -683,7 +861,9 @@ class AdminStatsView(APIView):
             'overall_attendance_rate': att_rate,
             'total_bookings': total_bookings,
             'total_revenue': float(total_revenue),
-        })
+        }
+        cache.set(cache_key, res_data, timeout=30)
+        return Response(res_data)
 
 
 class AdminEnrollmentListView(generics.ListAPIView):
@@ -736,25 +916,30 @@ class AdminStaffManagementView(generics.ListCreateAPIView):
         return qs
 
     def list(self, request, *args, **kwargs):
-        """Override list to include subjects with names for teacher filtering."""
+        """Override list to include subjects with names and permanent Google Meet link for staff."""
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
         data = serializer.data
 
-        # Prefetch teacher subjects with names
+        # Prefetch teacher subjects with names and google_meet_link
         from .models import TeacherProfile
-        teacher_subjects = {}
+        teacher_info = {}
         for tp in TeacherProfile.objects.filter(
             user__in=queryset
         ).prefetch_related('subjects').select_related('user'):
-            teacher_subjects[tp.user_id] = list(tp.subjects.values('id', 'name'))
+            teacher_info[tp.user_id] = {
+                'subjects': list(tp.subjects.values('id', 'name')),
+                'google_meet_link': tp.google_meet_link or '',
+            }
 
         for item in data:
             uid = item['id']
-            if uid in teacher_subjects:
-                item['subjects_detail'] = teacher_subjects[uid]
+            if uid in teacher_info:
+                item['subjects_detail'] = teacher_info[uid]['subjects']
+                item['google_meet_link'] = teacher_info[uid]['google_meet_link']
             else:
                 item['subjects_detail'] = []
+                item['google_meet_link'] = ''
 
         return Response(data)
 
@@ -807,11 +992,79 @@ class AdminAssignStaffView(APIView):
 
 
 class AdminStaffDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated]
     serializer_class = StaffUpdateSerializer
+
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        if not (request.user.is_staff or request.user.is_superuser or request.user.role == 'admin'):
+            raise PermissionDenied("Only administrators can manage staff.")
 
     def get_queryset(self):
         return User.objects.filter(platform='classes', role='teacher')
+
+
+class AdminTeacherMeetLinkView(APIView):
+    """
+    Classes Admin assigns, modifies, or clears a teacher's permanent Google Meet link.
+    Synchronizes across the teacher's profile and active/upcoming sessions.
+    PATCH/POST /api/classes/admin/teacher/<pk>/meet-link/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, pk):
+        return self._update_meet_link(request, pk)
+
+    def post(self, request, pk):
+        return self._update_meet_link(request, pk)
+
+    def _update_meet_link(self, request, pk):
+        user = request.user
+        if not (user.is_staff or user.is_superuser or user.role == 'admin'):
+            raise PermissionDenied("Only classes administrators can assign or update teacher Google Meet links.")
+
+        try:
+            teacher = User.objects.get(pk=pk, platform='classes', role='teacher')
+        except User.DoesNotExist:
+            return Response({'error': 'Teacher not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        from .models import TeacherProfile, Booking, ClassSession
+        profile, _ = TeacherProfile.objects.get_or_create(user=teacher)
+        link = request.data.get('google_meet_link', '').strip()
+
+        # Validation: link can be empty (to clear) or must be valid URL
+        if link and not ('meet.google.com' in link or link.startswith('http://') or link.startswith('https://')):
+            return Response({'error': 'Please enter a valid Google Meet URL (e.g. https://meet.google.com/abc-defg-hij).'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Normalize URL if missing protocol
+        if link and not (link.startswith('http://') or link.startswith('https://')):
+            link = f"https://{link}"
+
+        profile.google_meet_link = link
+        profile.save(update_fields=['google_meet_link'])
+
+        # Synchronize active bookings and upcoming sessions
+        sync_sessions = request.data.get('sync_sessions', True)
+        updated_bookings = 0
+        updated_classes = 0
+        if sync_sessions and link:
+            updated_bookings = Booking.objects.filter(
+                teacher=teacher,
+                booking_status__in=['pending', 'confirmed']
+            ).update(google_meet_link=link)
+
+            updated_classes = ClassSession.objects.filter(
+                teacher=teacher,
+                status='Scheduled'
+            ).update(meeting_link=link)
+
+        return Response({
+            'success': True,
+            'message': 'Google Meet link successfully updated for teacher.' if link else 'Google Meet link removed.',
+            'google_meet_link': profile.google_meet_link,
+            'updated_bookings': updated_bookings,
+            'updated_classes': updated_classes,
+        })
 
 
 class AdminStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -909,8 +1162,6 @@ class AdminUserAnalyticsView(APIView):
 
             try:
                 profile = user.classes_teacher_profile
-                hourly_rate = float(profile.hourly_rate)
-                
                 data['user']['bio'] = profile.bio
                 data['user']['qualification'] = profile.qualification
                 data['user']['experience'] = profile.experience
@@ -923,14 +1174,7 @@ class AdminUserAnalyticsView(APIView):
                 data['user']['courses'] = [c.name for c in profile.subjects.all()]
                 data['user']['taught_subjects'] = [s.name for s in profile.taught_subjects.all()]
             except Exception as e:
-                hourly_rate = 0
-            total_earnings = round((total_minutes / 60) * hourly_rate, 2)
-            
-            from django.utils import timezone
-            month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            month_sessions = sessions.filter(scheduled_time__gte=month_start)
-            month_minutes = month_sessions.aggregate(total=Sum('duration_minutes'))['total'] or 0
-            this_month_earnings = round((month_minutes / 60) * hourly_rate, 2)
+                pass
 
             student_breakdown = []
             for enrollment in Enrollment.objects.filter(teacher=user).select_related('student', 'course'):
@@ -939,21 +1183,16 @@ class AdminUserAnalyticsView(APIView):
                 )
                 mins = student_sessions.aggregate(total=Sum('duration_minutes'))['total'] or 0
                 hours = round(mins / 60, 1)
-                earned = round(hours * hourly_rate, 2)
                 student_breakdown.append({
                     'student_name': f"{enrollment.student.first_name} {enrollment.student.last_name}".strip(),
                     'course_name': enrollment.course.name,
                     'hours': hours,
-                    'earned': earned,
                 })
 
             data['analytics'] = {
                 'classes_taught': classes_taught,
                 'total_teaching_hours': round(total_minutes / 60, 1),
                 'avg_student_attendance_rate': avg_attendance_rate,
-                'hourly_rate': hourly_rate,
-                'total_earnings': total_earnings,
-                'this_month_earnings': this_month_earnings,
                 'student_breakdown': student_breakdown,
             }
 
@@ -2031,6 +2270,16 @@ class ClassesProfileView(APIView):
         for field in allowed_fields:
             if field in request.data:
                 setattr(user, field, request.data[field])
+
+        course_id = request.data.get('course_id')
+        if course_id and user.role == 'student':
+            try:
+                course = Course.objects.get(id=course_id, is_active=True)
+                user.current_class = course.name
+                Enrollment.objects.get_or_create(student=user, course=course)
+            except Course.DoesNotExist:
+                pass
+
         user.save()
         
         # Generate new token with updated claims (e.g. first_name)

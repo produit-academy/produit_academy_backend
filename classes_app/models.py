@@ -188,7 +188,7 @@ class TeacherDemoVideo(models.Model):
         return f"{self.title} - {self.teacher.username}"
 
 
-PLATFORM_FEE = 50  # ₹50 platform fee per booking
+PLATFORM_FEE = 0  # Platform fee removed
 
 
 class Booking(models.Model):
@@ -230,7 +230,7 @@ class Booking(models.Model):
     razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
     razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
 
-    expires_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Reservation timeout for pending bookings (15 min)")
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Reservation timeout for pending bookings (5 min)")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

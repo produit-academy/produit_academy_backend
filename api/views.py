@@ -724,5 +724,7 @@ class VerifyOTPAndLoginView(APIView):
                 'last_name': user.last_name,
                 'role': user.role,
                 'platform': user.platform,
+                'current_class': user.current_class or '',
+                'school_name': user.school_name or '',
             },
         })

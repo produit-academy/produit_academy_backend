@@ -1,6 +1,7 @@
 import logging
 import razorpay
 from django.db import transaction
+from django.db.models import Q
 from django.conf import settings
 from django.utils import timezone
 from classes_app.models import Booking, Enrollment, PaymentTransaction, BookingSchedule, ClassSession
@@ -112,6 +113,8 @@ def confirm_booking_payment(booking_id, razorpay_order_id, razorpay_payment_id, 
         # Mark booking as confirmed
         booking.payment_status = 'advance_paid'
         booking.booking_status = 'confirmed'
+        booking.advance_amount = booking.total_amount
+        booking.remaining_amount = Decimal('0.00')
         if razorpay_order_id:
             booking.razorpay_order_id = razorpay_order_id
         if razorpay_payment_id:
@@ -244,15 +247,90 @@ def recheck_razorpay_payment(order_id_or_booking_id):
                 'message': 'Gateway reports payment as Failed.'
             }
 
+        # If order exists in gateway with status 'created' and has no payments:
+        is_expired = booking.expires_at and booking.expires_at < timezone.now()
+        if is_expired:
+            booking.booking_status = 'cancelled'
+            booking.payment_status = 'failed'
+            booking.save(update_fields=['booking_status', 'payment_status'])
+
+            BookingSchedule.objects.filter(booking=booking, status='scheduled').update(status='cancelled')
+
+            PaymentTransaction.objects.filter(razorpay_order_id=order_id).update(
+                status='failed',
+                error_code='EXPIRED_UNPAID',
+                error_description='Order was abandoned without payment. The 5-minute checkout reservation expired.'
+            )
+            from django.core.cache import cache
+            cache.set(f"teacher_slots_v_{booking.teacher_id}", timezone.now().timestamp(), timeout=86400)
+
+            return {
+                'success': True,
+                'status': 'expired',
+                'booking_status': 'cancelled',
+                'payment_status': 'failed',
+                'message': '5-minute payment window expired with no payment made. Marked as Expired/Failed and slots freed.'
+            }
+
         return {
             'success': True,
             'status': order.get('status', 'created'),
-            'message': f"Order exists in gateway with status '{order.get('status')}'. No captured payment yet."
+            'message': f"Order exists in gateway with status '{order.get('status')}'. Awaiting payment (expires in {int((booking.expires_at - timezone.now()).total_seconds() / 60) if booking.expires_at else 0} min)."
         }
 
     except Exception as e:
         logger.error(f"Error querying Razorpay for order {order_id}: {e}", exc_info=True)
         return {'success': False, 'error': str(e)}
+
+
+def expire_stale_pending_bookings(teacher_id=None):
+    """
+    Sweeps and cancels any pending booking whose 5-minute reservation hold (expires_at) has passed.
+    Releases all held BookingSchedule entries and frees up teacher slots.
+    """
+    now = timezone.now()
+    qs = Booking.objects.filter(
+        Q(booking_status='pending') | Q(payment_status='pending'),
+        expires_at__lt=now
+    )
+    if teacher_id:
+        qs = qs.filter(teacher_id=teacher_id)
+
+    affected_bookings = list(qs)
+    if not affected_bookings:
+        return 0
+
+    booking_ids = [b.id for b in affected_bookings]
+    teacher_ids = set(b.teacher_id for b in affected_bookings)
+
+    # 1. Update bookings to cancelled / failed
+    Booking.objects.filter(id__in=booking_ids).update(
+        booking_status='cancelled',
+        payment_status='failed'
+    )
+
+    # 2. Release schedules
+    BookingSchedule.objects.filter(booking_id__in=booking_ids, status='scheduled').update(
+        status='cancelled'
+    )
+
+    # 3. Update pending PaymentTransactions
+    PaymentTransaction.objects.filter(
+        booking_id__in=booking_ids,
+        status__in=['created', 'pending']
+    ).update(
+        status='failed',
+        error_code='EXPIRED_UNPAID',
+        error_description='Checkout reservation timed out after 5 minutes without payment.'
+    )
+
+    # 4. Invalidate caches for affected teachers
+    from django.core.cache import cache
+    for tid in teacher_ids:
+        cache.set(f"teacher_slots_v_{tid}", now.timestamp(), timeout=86400)
+
+    logger.info(f"Swept and expired {len(affected_bookings)} stale bookings: {booking_ids}")
+    return len(affected_bookings)
 
 
 def reconcile_payment(booking_id, admin_user, reason, action='mark_paid'):

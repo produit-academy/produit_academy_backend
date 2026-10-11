@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     ClassesMeView,
     StudentDashboardView,
+    StudentChangeClassView,
     TeacherDashboardView,
     SessionCreateView,
     SessionRosterView,
@@ -17,6 +18,7 @@ from .views import (
     AdminStaffManagementView,
     AdminAssignStaffView,
     AdminStaffDetailView,
+    AdminTeacherMeetLinkView,
     AdminStudentDetailView,
     AdminEnrollmentToggleCompletionView,
     AdminUserAnalyticsView,
@@ -24,6 +26,7 @@ from .views import (
     BookSessionView, CompleteSessionView,
     ClassesProfileView, ClassesChangePasswordView,
     TeacherAvailabilityView, StudentTeacherSlotsView, CancelSessionView,
+    TeacherClassAnalysisView,
     ClassSessionOutcomeView, ClassSessionMeetLinkView, AdminClassSessionsListView,
     ClassReportListCreateView, ClassReportDetailView,
     DailyVoiceNoteListCreateView,
@@ -52,6 +55,7 @@ from .views_booking import (
     AdminPaymentListView,
     AdminPaymentRecheckView,
     AdminPaymentReconcileView,
+    AdminClearExpiredPaymentsView,
     TeacherLiveSlotsView,
 )
 
@@ -71,6 +75,7 @@ urlpatterns = [
 
     # Dashboard Feeds
     path('student/dashboard/', StudentDashboardView.as_view(), name='classes-student-dashboard'),
+    path('student/change-class/', StudentChangeClassView.as_view(), name='classes-student-change-class'),
     path('teacher/dashboard/', TeacherDashboardView.as_view(), name='classes-teacher-dashboard'),
     path('student/stats/', StudentStatsView.as_view(), name='student-stats'),
 
@@ -111,6 +116,7 @@ urlpatterns = [
     path('teacher/manage-profile/', TeacherProfileManageView.as_view(), name='teacher-manage-profile'),
     path('teacher/demo-videos/', TeacherDemoVideoManageView.as_view(), name='teacher-demo-videos'),
     path('teacher/bookings/', TeacherBookingsView.as_view(), name='teacher-bookings'),
+    path('teacher/class-analysis/', TeacherClassAnalysisView.as_view(), name='teacher-class-analysis'),
     path('schedule/<int:pk>/cancel/', CancelScheduleView.as_view(), name='schedule-cancel'),
     path('student/teacher-slots/', StudentTeacherSlotsView.as_view(), name='student-teacher-slots'),
     path('session/<int:pk>/cancel/', CancelSessionView.as_view(), name='session-cancel'),
@@ -118,6 +124,7 @@ urlpatterns = [
     # Admin
     path('admin/staff/', AdminStaffManagementView.as_view(), name='admin-staff-management'),
     path('admin/staff/<int:pk>/', AdminStaffDetailView.as_view(), name='admin-staff-detail'),
+    path('admin/teacher/<int:pk>/meet-link/', AdminTeacherMeetLinkView.as_view(), name='admin-teacher-meet-link'),
     path('admin/students/', AdminStudentsListView.as_view(), name='admin-students-list'),
     path('admin/students/<int:pk>/', AdminStudentDetailView.as_view(), name='admin-student-detail'),
     path('admin/students/<int:pk>/action/', AdminStudentActionView.as_view(), name='admin-student-action'),
@@ -133,6 +140,7 @@ urlpatterns = [
     path('admin/subjects/', AdminSubjectManageView.as_view(), name='admin-subjects'),
     path('admin/sessions/', AdminClassSessionsListView.as_view(), name='admin-class-sessions-list'),
     path('admin/payments/', AdminPaymentListView.as_view(), name='admin-payments-list'),
+    path('admin/payments/clear-expired/', AdminClearExpiredPaymentsView.as_view(), name='admin-payments-clear-expired'),
     path('admin/payments/<int:pk>/recheck/', AdminPaymentRecheckView.as_view(), name='admin-payment-recheck'),
     path('admin/payments/<int:pk>/reconcile/', AdminPaymentReconcileView.as_view(), name='admin-payment-reconcile'),
 ]

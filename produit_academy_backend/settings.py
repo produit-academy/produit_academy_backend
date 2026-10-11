@@ -39,9 +39,10 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'classes_app.middleware.ClearHSTSMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -69,17 +70,31 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'produit_academy_backend.wsgi.application'
 
-# --- DATABASE (NEON / RENDER) ---
+# --- DATABASE (NEON / RENDER) WITH CONNECTION POOLING ---
 DATABASES = {
     'default': dj_database_url.config(
         default=os.environ.get('DATABASE_URL'),
-        conn_max_age=0 if DEBUG else 600,
-        ssl_require=not DEBUG
+        conn_max_age=600,
+        conn_health_checks=True,
+        ssl_require=True
     )
 }
 if 'OPTIONS' not in DATABASES['default']:
     DATABASES['default']['OPTIONS'] = {}
 DATABASES['default']['OPTIONS']['connect_timeout'] = 10
+
+# --- HIGH-PERFORMANCE IN-MEMORY CACHE ---
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'produit_classes_cache',
+        'TIMEOUT': 300,
+        'OPTIONS': {
+            'MAX_ENTRIES': 5000,
+        }
+    }
+}
+
 AUTH_USER_MODEL = 'api.User'
 
 # --- CORS & CSRF ---
@@ -130,12 +145,12 @@ if not DEBUG:
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = 'DENY'
-    SECURE_SSL_REDIRECT = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
+    SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'False') == 'True'
+    SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'False') == 'True'
+    CSRF_COOKIE_SECURE = os.environ.get('CSRF_COOKIE_SECURE', 'False') == 'True'
+    SECURE_HSTS_SECONDS = 31536000 if os.environ.get('SECURE_SSL_REDIRECT') == 'True' else 0
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = os.environ.get('SECURE_SSL_REDIRECT') == 'True'
+    SECURE_HSTS_PRELOAD = os.environ.get('SECURE_SSL_REDIRECT') == 'True'
 
 # --- EMAIL SETTINGS ---
 EMAIL_BACKEND = "anymail.backends.sendinblue.EmailBackend"

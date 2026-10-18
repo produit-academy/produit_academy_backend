@@ -1,9 +1,11 @@
 from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
-from django.utils.html import strip_tags
+from django.utils.html import strip_tags, escape
 from datetime import timedelta
+import logging
 import random
+import secrets
 from django.core.cache import cache
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
@@ -13,13 +15,32 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .models import User, Branch, CourseRequest, Session
 from .serializers import (
-    UserSerializer, MyTokenObtainPairSerializer, BranchSerializer,
+    UserSerializer, SignUpSerializer, MyTokenObtainPairSerializer, BranchSerializer,
     ChangePasswordSerializer, UserProfileSerializer,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _generate_otp():
+    """6-digit OTP from a cryptographically secure source."""
+    return str(secrets.randbelow(900000) + 100000)
+
+
+def _generate_student_id():
+    """Unique PROD-XXXX id; widens to more digits only if the 4-digit space is crowded."""
+    for digits in (4, 4, 4, 4, 4, 6, 6, 6, 8):
+        candidate = f"PROD-{random.randint(10 ** (digits - 1), 10 ** digits - 1)}"
+        if not User.objects.filter(student_id=candidate).exists():
+            return candidate
+    return f"PROD-{secrets.token_hex(6).upper()}"
+
 # --- EMAIL HELPER FUNCTION ---
 
-def send_html_email(subject, recipient_email, username, otp=None, type='reset', from_email=None, **kwargs): 
+def send_html_email(subject, recipient_email, username, otp=None, type='reset', from_email=None, **kwargs):
+    # User-supplied text is placed inside HTML below, so escape it first
+    username = escape(username) if isinstance(username, str) else username
+    kwargs = {k: escape(v) if isinstance(v, str) else v for k, v in kwargs.items()}
     if type == 'reset':
         title = "Password Reset Request"
         intro = "We received a request to reset the password for your account."
@@ -325,12 +346,12 @@ class MyTokenObtainPairView(TokenObtainPairView):
 
 class SignUpView(generics.CreateAPIView):
     queryset = User.objects.all()
-    serializer_class = UserSerializer
+    serializer_class = SignUpSerializer
 
     def perform_create(self, serializer):
         user = serializer.save()
-        user.student_id = f"PROD-{random.randint(1000, 9999)}"
-        otp = str(random.randint(100000, 999999))
+        user.student_id = _generate_student_id()
+        otp = _generate_otp()
         user.otp = otp
         user.otp_expiry = timezone.now() + timedelta(minutes=10)
         user.save()
@@ -475,7 +496,7 @@ class ResendOTPView(APIView):
 
         try:
             user = User.objects.get(email__iexact=email)
-            otp = str(random.randint(100000, 999999))
+            otp = _generate_otp()
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save(update_fields=['otp', 'otp_expiry'])
@@ -518,7 +539,7 @@ class PasswordResetRequestOTPView(APIView):
             if not user:
                 return Response({'detail': 'User not found.'}, status=404)
 
-            otp = str(random.randint(100000, 999999))
+            otp = _generate_otp()
             user.otp = otp
             user.otp_expiry = timezone.now() + timedelta(minutes=10)
             user.save(update_fields=['otp', 'otp_expiry'])
@@ -531,8 +552,9 @@ class PasswordResetRequestOTPView(APIView):
                 return Response({'detail': 'Password reset verification code sent to your email.'})
             except Exception:
                 return Response({'detail': 'Failed to send email. Please try again later.'}, status=500)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=500)
+        except Exception:
+            logger.exception("Password reset request failed")
+            return Response({'detail': 'Something went wrong. Please try again later.'}, status=500)
 
 
 class PasswordResetConfirmView(APIView):
@@ -580,8 +602,9 @@ class PasswordResetConfirmView(APIView):
             remaining = MAX_OTP_ATTEMPTS - attempts
             return Response({'detail': f'Invalid or expired code. {remaining} attempt(s) remaining.'}, status=400)
 
-        except Exception as e:
-            return Response({'detail': str(e)}, status=500)
+        except Exception:
+            logger.exception("Password reset confirm failed")
+            return Response({'detail': 'Something went wrong. Please try again later.'}, status=500)
 
 # --- DASHBOARD & USER MANAGEMENT ---
 
@@ -661,7 +684,7 @@ class StudentOTPRegisterView(APIView):
                     existing_user.first_name = name_parts[0]
                     existing_user.last_name = name_parts[1] if len(name_parts) > 1 else ''
                     existing_user.phone_number = phone_number
-                    otp = str(random.randint(100000, 999999))
+                    otp = _generate_otp()
                     if settings.DEBUG:
                         print(f"\n[DEBUG] Refreshed Registration OTP for {email}: {otp}\n")
                     existing_user.otp = otp
@@ -689,7 +712,7 @@ class StudentOTPRegisterView(APIView):
         first_name = name_parts[0]
         last_name = name_parts[1] if len(name_parts) > 1 else ''
 
-        otp = str(random.randint(100000, 999999))
+        otp = _generate_otp()
         if settings.DEBUG:
             print(f"\n[DEBUG] Registration OTP for {email}: {otp}\n")
 
@@ -706,7 +729,7 @@ class StudentOTPRegisterView(APIView):
             is_active=True,
             is_verified=False,
         )
-        user.student_id = f"PROD-{random.randint(1000, 9999)}"
+        user.student_id = _generate_student_id()
         user.otp = otp
         user.otp_expiry = timezone.now() + timedelta(minutes=10)
         user.save()
@@ -768,7 +791,7 @@ class StudentOTPLoginView(APIView):
             if time_left.total_seconds() > 540:  # Less than 1 min since last OTP
                 return Response({'error': 'Please wait before requesting another OTP.'}, status=429)
 
-        otp = str(random.randint(100000, 999999))
+        otp = _generate_otp()
         if settings.DEBUG:
             print(f"\n[DEBUG] Login OTP for {email}: {otp}\n")
             
@@ -798,8 +821,8 @@ class VerifyOTPAndLoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        email = request.data.get('email', '').strip().lower()
-        otp = request.data.get('otp', '').strip()
+        email = str(request.data.get('email') or '').strip().lower()
+        otp = str(request.data.get('otp') or '').strip()
 
         if not email or not otp:
             return Response({'error': 'Email and OTP are required.'}, status=400)
@@ -808,6 +831,16 @@ class VerifyOTPAndLoginView(APIView):
             user = User.objects.get(email=email)
         except User.DoesNotExist:
             return Response({'error': 'No account found with this email. Please register first.'}, status=404)
+
+        # Brute-force protection (same policy as the other OTP endpoints)
+        is_locked, _ = _check_otp_rate_limit("otp_login_fail", email)
+        if is_locked:
+            user.otp = None
+            user.otp_expiry = None
+            user.save(update_fields=['otp', 'otp_expiry'])
+            return Response({
+                'error': 'Too many failed attempts. For your security, this code has been revoked. Please request a new OTP.'
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
         # Platform check: Block GATE accounts
         if user.platform != 'classes':
@@ -827,9 +860,18 @@ class VerifyOTPAndLoginView(APIView):
 
         # Verify OTP
         if not user.otp or user.otp != otp:
+            attempts = _record_otp_failure("otp_login_fail", email)
+            if attempts >= MAX_OTP_ATTEMPTS:
+                user.otp = None
+                user.otp_expiry = None
+                user.save(update_fields=['otp', 'otp_expiry'])
+                return Response({
+                    'error': 'Too many failed attempts. For your security, this code has been revoked. Please request a new OTP.'
+                }, status=status.HTTP_429_TOO_MANY_REQUESTS)
             return Response({'error': 'Invalid OTP. Please check the code and try again.'}, status=400)
         if user.otp_expiry and timezone.now() > user.otp_expiry:
             return Response({'error': 'OTP has expired. Please request a new one.'}, status=400)
+        _clear_otp_rate_limit("otp_login_fail", email)
 
         # Mark verified and clear OTP
         user.is_verified = True

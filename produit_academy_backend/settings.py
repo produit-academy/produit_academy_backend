@@ -11,6 +11,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # --- SECURITY CONFIGURATION ---
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dev-key')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+if not DEBUG and SECRET_KEY == 'django-insecure-dev-key':
+    import sys
+    print("WARNING: SECRET_KEY env var is not set - login tokens can be forged. "
+          "Set SECRET_KEY in the hosting environment.", file=sys.stderr)
 
 # Allow hosts from Render
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
@@ -198,4 +202,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
 RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
-ALLOW_DUMMY_PAYMENT = os.environ.get('ALLOW_DUMMY_PAYMENT', 'False').strip().lower() == 'true'
+ALLOW_DUMMY_PAYMENT = os.environ.get('ALLOW_DUMMY_PAYMENT', 'False').strip().lower() == 'true'
+# --- CHATBOT INTEGRATION (optional: endpoints stay disabled until both are set) ---
+# CHATBOT_JWT_SECRET must equal SHARED_JWT_SECRET on the chatbot server.
+# CHATBOT_SERVICE_KEY must equal MAIN_SITE_API_KEY on the chatbot server.
+CHATBOT_JWT_SECRET = os.environ.get('CHATBOT_JWT_SECRET', '')
+CHATBOT_SERVICE_KEY = os.environ.get('CHATBOT_SERVICE_KEY', '')

@@ -97,6 +97,11 @@ class UserSerializer(serializers.ModelSerializer):
         user.save()
         return user
 
+class SignUpSerializer(UserSerializer):
+    """Public self-registration: privilege fields can never be set by the client."""
+    class Meta(UserSerializer.Meta):
+        read_only_fields = ('role', 'platform', 'student_id', 'is_active')
+
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=True)
     new_password = serializers.CharField(required=True)

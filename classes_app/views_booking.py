@@ -145,8 +145,10 @@ class TeachersBySubjectView(APIView):
                 'available_user_ids': available_user_ids,
             }
         )
-        cache.set(cache_key, serializer.data, timeout=60)  # 1 minute
-        return Response(serializer.data)
+        # Public endpoint: never expose teachers' private classroom links
+        data = [{k: v for k, v in row.items() if k != 'google_meet_link'} for row in serializer.data]
+        cache.set(cache_key, data, timeout=60)  # 1 minute
+        return Response(data)
 
 
 class TeacherProfileDetailView(APIView):
@@ -162,7 +164,9 @@ class TeacherProfileDetailView(APIView):
             return Response({'error': 'Teacher not found'}, status=404)
 
         serializer = TeacherProfileDetailSerializer(profile, context={'request': request})
-        return Response(serializer.data)
+        data = dict(serializer.data)
+        data.pop('google_meet_link', None)  # public page: keep classroom link private
+        return Response(data)
 
 
 # ============================================================
@@ -1501,8 +1505,11 @@ class TeacherLiveSlotsView(APIView):
             except TeacherProfile.DoesNotExist:
                 return Response({'error': 'Teacher not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Clear any expired pending holds for this teacher
-        expire_stale_pending_bookings(teacher_id=teacher.id)
+        # Clear any expired pending holds for this teacher. This endpoint is polled every
+        # few seconds by every open booking page, so run the write-heavy sweep at most
+        # once per 15s per teacher (held slots below are still computed exactly).
+        if cache.add(f"expire_sweep_{teacher.id}", 1, timeout=15):
+            expire_stale_pending_bookings(teacher_id=teacher.id)
 
         today = dt_date.today()
         hold_cutoff = timezone.now() - timedelta(minutes=5)

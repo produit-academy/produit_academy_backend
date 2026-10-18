@@ -545,12 +545,19 @@ class SessionCreateView(APIView):
 
 # --- Session Roster ---
 
+def _sessions_for_teacher(user):
+    """Teachers may only touch their own sessions; platform staff keep full access."""
+    if user.is_staff or user.is_superuser:
+        return ClassSession.objects.all()
+    return ClassSession.objects.filter(teacher=user)
+
+
 class SessionRosterView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
 
     def get(self, request, pk):
         try:
-            session = ClassSession.objects.get(pk=pk)
+            session = _sessions_for_teacher(request.user).get(pk=pk)
         except ClassSession.DoesNotExist:
             return Response({'detail': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -572,7 +579,7 @@ class BulkAttendanceView(APIView):
 
     def post(self, request, pk):
         try:
-            session = ClassSession.objects.get(pk=pk)
+            session = _sessions_for_teacher(request.user).get(pk=pk)
         except ClassSession.DoesNotExist:
             return Response({'detail': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1807,7 +1814,9 @@ class TeacherMonthlyReportDetailView(generics.RetrieveUpdateDestroyAPIView):
         user = self.request.user
         if user.role == 'teacher':
             return TeacherMonthlyReport.objects.filter(teacher=user)
-        return TeacherMonthlyReport.objects.all()
+        if user.is_staff or is_classes_staff_or_admin(user):
+            return TeacherMonthlyReport.objects.all()
+        return TeacherMonthlyReport.objects.none()
 
     def perform_update(self, serializer):
         user = self.request.user

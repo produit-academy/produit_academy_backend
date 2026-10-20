@@ -30,7 +30,12 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['is_staff'] = user.is_staff
         token['profile_complete'] = bool(user.college and user.phone_number)
         token['platform'] = user.platform
-        token['is_staff_user'] = hasattr(user, 'staff_profile') or user.role in ['staff', 'manager', 'admin'] or user.is_superuser or user.is_staff
+        token['is_staff_user'] = (
+            user.role in ['staff', 'manager', 'admin']
+            or user.is_superuser
+            or user.is_staff
+            or hasattr(user, 'staff_profile')
+        )
         return token
 
     def validate(self, attrs):
@@ -40,10 +45,15 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         if not identifier or not password:
             raise AuthenticationFailed('Email/username and password are required.')
 
-        # Case-insensitive lookup by email or username
+        clean_id = identifier
+        clean_email = clean_id.lower()
+        # Fast indexed lookup first (email is unique B-tree index in Postgres)
         user = (
-            User.objects.filter(email__iexact=identifier).first()
-            or User.objects.filter(username__iexact=identifier).first()
+            User.objects.select_related('staff_profile').filter(email=clean_email).first()
+            or User.objects.select_related('staff_profile').filter(email=clean_id).first()
+            or User.objects.select_related('staff_profile').filter(username=clean_id).first()
+            or User.objects.select_related('staff_profile').filter(email__iexact=clean_id).first()
+            or User.objects.select_related('staff_profile').filter(username__iexact=clean_id).first()
         )
 
         if not user:
@@ -65,11 +75,18 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         self.user = user
         refresh = self.get_token(user)
 
+        is_staff_user = (
+            user.role in ['staff', 'manager', 'admin']
+            or user.is_superuser
+            or user.is_staff
+            or hasattr(user, 'staff_profile')
+        )
+
         data = {
             'refresh': str(refresh),
             'access': str(refresh.access_token),
             'role': 'admin' if user.is_superuser else user.role,
-            'is_staff_user': hasattr(user, 'staff_profile') or user.role in ['staff', 'manager', 'admin'] or user.is_superuser or user.is_staff,
+            'is_staff_user': is_staff_user,
         }
 
         if api_settings.UPDATE_LAST_LOGIN:

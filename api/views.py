@@ -305,23 +305,21 @@ class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
-        if response.status_code == status.HTTP_200_OK:
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = getattr(serializer, 'user', None)
+        # Single Session Enforcement (STUDENTS ONLY)
+        if user and user.role == 'student' and not user.is_staff and not user.is_superuser:
             try:
-                identifier = (request.data.get('email') or request.data.get('username') or '').strip()
-                user = (
-                    User.objects.filter(email__iexact=identifier).first()
-                    or User.objects.filter(username__iexact=identifier).first()
-                )
-                # Single Session Enforcement (STUDENTS ONLY)
-                if user and user.role == 'student' and not user.is_staff and not user.is_superuser:
-                    Session.objects.filter(user=user).delete()
-                    session_key = response.data.get('access')
-                    if session_key:
-                        Session.objects.create(user=user, session_key=str(session_key))
+                Session.objects.filter(user=user).delete()
+                session_key = serializer.validated_data.get('access')
+                if session_key:
+                    Session.objects.create(user=user, session_key=str(session_key))
             except Exception:
                 pass
-        return response
+
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
 
 class SignUpView(generics.CreateAPIView):
     queryset = User.objects.all()

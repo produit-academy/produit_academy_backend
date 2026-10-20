@@ -668,6 +668,58 @@ class StaffChangePasswordView(APIView):
         return Response({'message': 'Password changed successfully.'})
 
 
+class StaffDashboardStatsView(APIView):
+    """Ultra-fast, aggregated statistics for dashboard without loading entire models."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        role = user.role
+        is_admin_or_mgr = user.is_superuser or role in ['admin', 'manager']
+
+        if is_admin_or_mgr:
+            total_staff = User.objects.filter(
+                role__in=['staff', 'manager', 'teacher']
+            ).exclude(id=user.id).count()
+
+            task_counts = StaffTask.objects.aggregate(
+                total=db_models.Count('id'),
+                pending=db_models.Count('id', filter=db_models.Q(status__in=['pending', 'assigned'])),
+                in_progress=db_models.Count('id', filter=db_models.Q(status='in_progress')),
+                completed=db_models.Count('id', filter=db_models.Q(status='completed')),
+            )
+            return Response({
+                'isManagerOrAdmin': True,
+                'totalStaff': total_staff,
+                'totalTasks': task_counts['total'] or 0,
+                'pendingTasks': task_counts['pending'] or 0,
+                'inProgress': task_counts['in_progress'] or 0,
+                'completed': task_counts['completed'] or 0,
+            })
+        else:
+            task_counts = StaffTask.objects.filter(assigned_to=user).aggregate(
+                total=db_models.Count('id'),
+                pending=db_models.Count('id', filter=db_models.Q(status__in=['pending', 'assigned'])),
+                in_progress=db_models.Count('id', filter=db_models.Q(status='in_progress')),
+                completed=db_models.Count('id', filter=db_models.Q(status='completed')),
+            )
+            wallet_balance = '0.00'
+            try:
+                if hasattr(user, 'wallet'):
+                    wallet_balance = str(user.wallet.balance)
+            except Exception:
+                pass
+
+            return Response({
+                'isManagerOrAdmin': False,
+                'myTotalTasks': task_counts['total'] or 0,
+                'myPendingTasks': task_counts['pending'] or 0,
+                'myInProgress': task_counts['in_progress'] or 0,
+                'myCompleted': task_counts['completed'] or 0,
+                'walletBalance': wallet_balance,
+            })
+
+
 class StaffMyModulesView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -675,11 +727,12 @@ class StaffMyModulesView(APIView):
         user = request.user
         if user.role == 'staff':
             try:
-                profile = user.staff_profile
+                profile = StaffProfile.objects.select_related('department').get(user=user)
                 user_mods = set(profile.get_all_modules())
                 dept = profile.department
                 accessible = [m for m in AVAILABLE_MODULES if m['key'] in user_mods]
-                return Response({'department': DepartmentSerializer(dept).data if dept else None, 'modules': accessible})
+                dept_data = {'id': dept.id, 'name': dept.name} if dept else None
+                return Response({'department': dept_data, 'modules': accessible})
             except StaffProfile.DoesNotExist:
                 return Response({'department': None, 'modules': []})
 
@@ -697,7 +750,11 @@ class StaffTaskListView(generics.ListAPIView):
         user = self.request.user
         if user.role not in ['staff', 'manager']:
             raise PermissionDenied()
-        return StaffTask.objects.filter(assigned_to=user).order_by('-created_at')
+        return StaffTask.objects.filter(assigned_to=user).select_related(
+            'assigned_to', 'assigned_by', 'reviewed_by', 'payment_assigned_by', 'payment_approved_by'
+        ).prefetch_related(
+            'comments__author', 'submission_history__submitted_by', 'submission_history__reviewed_by', 'payment'
+        ).order_by('-created_at')
 
 
 class StaffTaskUpdateView(generics.UpdateAPIView):
@@ -976,10 +1033,15 @@ class AdminTaskListView(generics.ListAPIView):
     def get_queryset(self):
         if not is_admin(self.request.user):
             raise PermissionDenied()
+        queryset = StaffTask.objects.select_related(
+            'assigned_to', 'assigned_by', 'reviewed_by', 'payment_assigned_by', 'payment_approved_by'
+        ).prefetch_related(
+            'comments__author', 'submission_history__submitted_by', 'submission_history__reviewed_by', 'payment'
+        ).order_by('-created_at')
         staff_id = self.request.query_params.get('staff_id')
         if staff_id:
-            return StaffTask.objects.filter(assigned_to_id=staff_id).order_by('-created_at')
-        return StaffTask.objects.all().order_by('-created_at')
+            return queryset.filter(assigned_to_id=staff_id)
+        return queryset
 
 
 class AdminTaskDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -1007,6 +1069,7 @@ class StaffWalletView(APIView):
         if request.user.role not in ['staff', 'manager', 'teacher']:
             raise PermissionDenied('Only staff/teachers can view their wallet.')
         wallet, _ = StaffWallet.objects.get_or_create(staff=request.user)
+        wallet = StaffWallet.objects.prefetch_related('transactions__task').get(id=wallet.id)
         serializer = StaffWalletSerializer(wallet)
         return Response(serializer.data)
 
@@ -1025,7 +1088,13 @@ class ManagerStaffListView(generics.ListAPIView):
             raise PermissionDenied('Only managers and admins can view all staff.')
         queryset = User.objects.filter(
             role__in=['staff', 'manager', 'teacher']
-        ).exclude(id=self.request.user.id).order_by('-date_joined')
+        ).exclude(id=self.request.user.id).select_related(
+            'staff_profile',
+            'staff_profile__department',
+            'wallet'
+        ).annotate(
+            annotated_task_count=db_models.Count('assigned_tasks', distinct=True)
+        ).order_by('-date_joined')
         role = self.request.query_params.get('role')
         if role:
             queryset = queryset.filter(role=role)
@@ -1076,7 +1145,11 @@ class ManagerTaskListView(generics.ListAPIView):
     def get_queryset(self):
         if not is_admin_or_manager(self.request.user):
             raise PermissionDenied()
-        queryset = StaffTask.objects.all().order_by('-created_at')
+        queryset = StaffTask.objects.select_related(
+            'assigned_to', 'assigned_by', 'reviewed_by', 'payment_assigned_by', 'payment_approved_by'
+        ).prefetch_related(
+            'comments__author', 'submission_history__submitted_by', 'submission_history__reviewed_by', 'payment'
+        ).order_by('-created_at')
         staff_id = self.request.query_params.get('staff_id')
         if staff_id:
             queryset = queryset.filter(assigned_to_id=staff_id)

@@ -3,6 +3,7 @@ from .views import (
     SuperAdminUserListView, SuperAdminUserCreateView, SuperAdminUserDetailView,
     AvailableModulesView, DepartmentListCreateView, DepartmentDetailView,
     StaffSignUpView, StaffProfileView, StaffChangePasswordView, StaffMyModulesView,
+    StaffDashboardStatsView,
     StaffTaskListView, StaffTaskUpdateView, StaffTaskSubmitCompletionView, TaskCommentView,
     StaffComplaintListView, StaffComplaintDetailView,
     StaffContactListView, StaffContactUpdateView,
@@ -31,6 +32,7 @@ urlpatterns = [
     path('admin/departments/modules/', AvailableModulesView.as_view(), name='available-modules'),
 
     # Staff Self-Service
+    path('staff/dashboard/stats/', StaffDashboardStatsView.as_view(), name='staff-dashboard-stats'),
     path('staff/signup/', StaffSignUpView.as_view(), name='staff-signup'),
     path('staff/profile/', StaffProfileView.as_view(), name='staff-profile'),
     path('staff/change-password/', StaffChangePasswordView.as_view(), name='staff-change-password'),

@@ -164,7 +164,12 @@ class StaffTaskSerializer(serializers.ModelSerializer):
         return None
 
     def get_is_paid(self, obj):
-        return obj.payment_status == 'paid' or obj.payment.filter(type='credit').exists()
+        if getattr(obj, 'payment_status', None) == 'paid':
+            return True
+        try:
+            return any(p.type == 'credit' for p in obj.payment.all())
+        except Exception:
+            return obj.payment.filter(type='credit').exists()
 
 
 class SuperAdminUserSerializer(serializers.ModelSerializer):
@@ -295,6 +300,8 @@ class ManagerStaffSerializer(serializers.ModelSerializer):
             return obj.get_role_display()
 
     def get_task_count(self, obj):
+        if hasattr(obj, 'annotated_task_count'):
+            return obj.annotated_task_count
         return obj.assigned_tasks.count()
 
     def get_wallet_balance(self, obj):

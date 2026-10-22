@@ -357,6 +357,12 @@ class TeacherProfileCardSerializer(serializers.ModelSerializer):
         ).exists()
         return 'Available' if has_slots else 'Unavailable'
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Student always sees total price per class (teacher payout + academy fee)
+        data['hourly_rate'] = float((instance.hourly_rate or 0) + (instance.platform_fee or 0))
+        return data
+
 
 class TeacherProfileDetailSerializer(serializers.ModelSerializer):
     """Full teacher profile for detail page."""
@@ -393,10 +399,25 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
-        if request and hasattr(request, 'user') and request.user.is_authenticated:
-            # If the teacher themselves is accessing their profile, conceal hourly_rate
-            if getattr(request.user, 'role', '') == 'teacher' and request.user.id == instance.user.id:
-                data.pop('hourly_rate', None)
+        user = getattr(request, 'user', None) if request else None
+
+        if user and user.is_authenticated:
+            if getattr(user, 'role', '') == 'teacher' and user.id == instance.user_id:
+                # Teacher viewing their own profile: sees ONLY their assigned rate
+                data['hourly_rate'] = float(instance.hourly_rate or 0)
+                data.pop('platform_fee', None)
+                return data
+            elif getattr(user, 'role', '') in ['admin', 'manager'] or getattr(user, 'is_superuser', False):
+                # Admin / Manager sees full transparency
+                data['hourly_rate'] = float(instance.hourly_rate or 0)
+                data['teacher_fee'] = float(instance.hourly_rate or 0)
+                data['platform_fee'] = float(instance.platform_fee or 0)
+                data['total_fee'] = float((instance.hourly_rate or 0) + (instance.platform_fee or 0))
+                return data
+
+        # Students and public visitors see ONLY the combined tuition fee
+        data['hourly_rate'] = float((instance.hourly_rate or 0) + (instance.platform_fee or 0))
+        data.pop('platform_fee', None)
         return data
 
     def get_demo_videos(self, obj):
@@ -519,6 +540,10 @@ class BookingSerializer(serializers.ModelSerializer):
     first_session_start = serializers.SerializerMethodField()
     has_started = serializers.SerializerMethodField()
     cancellation_policy_note = serializers.SerializerMethodField()
+    total_teacher_payout = serializers.SerializerMethodField()
+    total_platform_fee = serializers.SerializerMethodField()
+    credited_payout_amount = serializers.SerializerMethodField()
+    completed_classes_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -533,6 +558,7 @@ class BookingSerializer(serializers.ModelSerializer):
             'schedules', 'created_at',
             'can_cancel_booking', 'cancellation_deadline', 'first_session_start',
             'has_started', 'cancellation_policy_note',
+            'total_teacher_payout', 'total_platform_fee', 'credited_payout_amount', 'completed_classes_count',
         ]
         read_only_fields = [
             'student', 'teacher_fee_per_class', 'platform_fee',
@@ -540,6 +566,7 @@ class BookingSerializer(serializers.ModelSerializer):
             'payment_status', 'booking_status', 'google_meet_link', 'created_at',
             'can_cancel_booking', 'cancellation_deadline', 'first_session_start',
             'has_started', 'cancellation_policy_note',
+            'total_teacher_payout', 'total_platform_fee', 'credited_payout_amount', 'completed_classes_count',
         ]
 
     def _get_first_session_dt(self, obj):
@@ -620,6 +647,37 @@ class BookingSerializer(serializers.ModelSerializer):
 
         date_str = dt.strftime('%A, %b %d, %Y at %I:%M %p')
         return f"Eligible for 100% full refund before the first session starts on {date_str}."
+
+    def get_total_teacher_payout(self, obj):
+        return float((obj.teacher_fee_per_class or 0) * (obj.num_classes or 1))
+
+    def get_total_platform_fee(self, obj):
+        return float((obj.platform_fee or 0) * (obj.num_classes or 1))
+
+    def get_credited_payout_amount(self, obj):
+        schedules = obj.schedules.all()
+        t_rate = float(obj.teacher_fee_per_class or 0)
+        credited_count = sum(1 for s in schedules if getattr(s, 'class_session', None) and s.class_session.is_wallet_credited)
+        return float(credited_count * t_rate)
+
+    def get_completed_classes_count(self, obj):
+        return sum(1 for s in obj.schedules.all() if s.status == 'completed')
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+
+        # If accessed by a student, strictly conceal fee breakdown
+        if user and getattr(user, 'role', '') == 'student':
+            data.pop('teacher_fee_per_class', None)
+            data.pop('platform_fee', None)
+            data.pop('total_teacher_payout', None)
+            data.pop('total_platform_fee', None)
+            data.pop('credited_payout_amount', None)
+            data.pop('completed_classes_count', None)
+
+        return data
 
 
 class TeacherBookingSerializer(serializers.ModelSerializer):

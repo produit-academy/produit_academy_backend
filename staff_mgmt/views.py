@@ -417,6 +417,11 @@ class OnboardStaffView(APIView):
                 return getattr(getattr(u, 'classes_teacher_profile', None), 'hourly_rate', 0)
             return 0
 
+        def _get_staff_platform_fee(u):
+            if u.role == 'teacher':
+                return getattr(getattr(u, 'classes_teacher_profile', None), 'platform_fee', 0)
+            return 0
+
         teacher_profiles = {}
         for tp in TeacherProfile.objects.filter(
             user__in=staff
@@ -436,6 +441,8 @@ class OnboardStaffView(APIView):
             'has_signed': u.otp is None,  # OTP cleared = agreement signed
             'is_approved': _get_staff_approved(u),
             'hourly_rate': _get_staff_hourly_rate(u),
+            'platform_fee': _get_staff_platform_fee(u),
+            'total_fee': float(_get_staff_hourly_rate(u) or 0) + float(_get_staff_platform_fee(u) or 0),
             'subjects': teacher_profiles.get(u.id, []),
         } for u in staff]
 
@@ -452,6 +459,7 @@ class OnboardStaffView(APIView):
         last_name = request.data.get('last_name', '')
         phone_number = request.data.get('phone_number', '')
         hourly_rate = request.data.get('hourly_rate', 0)
+        platform_fee = request.data.get('platform_fee', 0)
 
         if not email or role not in ['teacher']:
             return Response({'error': 'Valid email and role (teacher) required.'}, status=400)
@@ -472,7 +480,9 @@ class OnboardStaffView(APIView):
         )
         
         if role == 'teacher':
-            profile = TeacherProfile.objects.create(user=user, hourly_rate=hourly_rate)
+            profile = TeacherProfile.objects.create(
+                user=user, hourly_rate=hourly_rate, platform_fee=platform_fee
+            )
             if subjects:
                 subs = Subject.objects.filter(id__in=subjects)
                 profile.taught_subjects.set(subs)
@@ -532,10 +542,13 @@ class OnboardStaffDetailView(APIView):
             course_ids = subs.values_list('course_id', flat=True).distinct()
             profile.subjects.set(Course.objects.filter(id__in=course_ids))
 
-        if 'hourly_rate' in request.data:
+        if 'hourly_rate' in request.data or 'platform_fee' in request.data:
             if user.role == 'teacher':
                 profile, _ = TeacherProfile.objects.get_or_create(user=user)
-                profile.hourly_rate = request.data['hourly_rate']
+                if 'hourly_rate' in request.data:
+                    profile.hourly_rate = request.data['hourly_rate']
+                if 'platform_fee' in request.data:
+                    profile.platform_fee = request.data['platform_fee']
                 profile.save()
 
         return Response({'message': 'Staff details updated successfully.'})

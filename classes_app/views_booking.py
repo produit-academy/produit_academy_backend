@@ -282,11 +282,11 @@ class StudentBookTeacherView(APIView):
             preferred_time = slots[0].start_time
             num_classes = len(slots)
 
-            # Calculate fees (no platform fee)
-            teacher_fee = profile.hourly_rate
-            total_teacher_fee = teacher_fee * num_classes
-            platform_fee = Decimal('0.00')
-            total_amount = total_teacher_fee
+            # Calculate fees (teacher fee + academy fee)
+            teacher_fee = profile.hourly_rate or Decimal('0.00')
+            platform_fee = profile.platform_fee or Decimal('0.00')
+            total_fee_per_class = teacher_fee + platform_fee
+            total_amount = total_fee_per_class * num_classes
             advance_amount = Decimal('0.00')  # 0 until payment is confirmed
             remaining_amount = total_amount   # full amount remains until paid
             expires_at = timezone.now() + timedelta(minutes=5)
@@ -324,13 +324,14 @@ class StudentBookTeacherView(APIView):
             # Invalidate real-time slot cache for teacher
             cache.set(f"teacher_slots_v_{teacher.id}", timezone.now().timestamp(), timeout=86400)
 
+            # Response for student: student only sees the combined fee per class and total amount
             return Response({
                 'booking_id': booking.id,
                 'teacher_name': f"{teacher.first_name} {teacher.last_name}".strip(),
                 'subject': subject.name,
                 'num_classes': num_classes,
-                'teacher_fee_per_class': float(teacher_fee),
-                'platform_fee': float(platform_fee),
+                'fee_per_class': float(total_fee_per_class),
+                'teacher_fee_per_class': float(total_fee_per_class),  # Student views total rate as tuition fee
                 'total_amount': float(total_amount),
                 'advance_amount': float(advance_amount),
                 'remaining_amount': float(remaining_amount),
@@ -863,9 +864,17 @@ class AdminPaymentListView(APIView):
         data = []
         for b in bookings[:100]:
             tx = tx_map.get(b.id)
-            is_paid = b.payment_status in ['advance_paid', 'fully_paid']
-            is_expired = bool(b.expires_at and b.expires_at < now and b.payment_status == 'pending')
-            
+            t_rate = float(b.teacher_fee_per_class or 0)
+            p_rate = float(b.platform_fee or 0)
+            n_classes = b.num_classes or 1
+            t_total = t_rate * n_classes
+            p_total = p_rate * n_classes
+
+            schedules = b.schedules.all()
+            completed_count = sum(1 for s in schedules if s.status == 'completed')
+            credited_count = sum(1 for s in schedules if getattr(s, 'class_session', None) and s.class_session.is_wallet_credited)
+            credited_amount = float(credited_count * t_rate)
+
             data.append({
                 'id': b.id,
                 'student_name': f"{b.student.first_name} {b.student.last_name}".strip() or b.student.username,
@@ -886,6 +895,15 @@ class AdminPaymentListView(APIView):
                 'razorpay_payment_id': b.razorpay_payment_id or '',
                 'gateway_status': tx.status if tx else 'uninitiated',
                 'created_at': b.created_at.isoformat(),
+                # Fee splitting & wallet payout telemetry
+                'num_classes': n_classes,
+                'teacher_fee_per_class': t_rate,
+                'platform_fee_per_class': p_rate,
+                'teacher_total_payout': t_total,
+                'platform_total_fee': p_total,
+                'completed_classes': completed_count,
+                'credited_classes': credited_count,
+                'credited_payout_amount': credited_amount,
             })
 
         return Response(data)

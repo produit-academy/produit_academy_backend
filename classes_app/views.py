@@ -1491,11 +1491,21 @@ class ClassSessionOutcomeView(APIView):
             status=schedule_status_map.get(outcome, 'completed')
         )
 
+        wallet_credited = False
+        credited_amount = 0
+        if outcome == 'Completed':
+            from .services.wallet_service import credit_teacher_for_completed_session
+            tx = credit_teacher_for_completed_session(session.pk)
+            if tx:
+                wallet_credited = True
+                credited_amount = float(tx.amount)
+
         return Response({
-            'message': f'Class outcome successfully recorded as {outcome}.',
+            'message': f'Class outcome successfully recorded as {outcome}.' + (f' ₹{credited_amount:.2f} credited to teacher wallet.' if wallet_credited else ''),
             'session_id': session.id,
             'status': session.status,
             'outcome_remarks': session.outcome_remarks,
+            'is_wallet_credited': session.is_wallet_credited or wallet_credited,
         })
 
 

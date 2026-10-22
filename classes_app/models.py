@@ -36,8 +36,16 @@ class TeacherProfile(models.Model):
     is_approved = models.BooleanField(default=False)
     hourly_rate = models.DecimalField(
         max_digits=8, decimal_places=2, default=0,
-        help_text="Fee per class (₹) - set by HR"
+        help_text="Teacher payment per class (₹) - set by HR"
     )
+    platform_fee = models.DecimalField(
+        max_digits=8, decimal_places=2, default=0,
+        help_text="Produit Academy fee per class (₹) - set by HR"
+    )
+
+    @property
+    def total_fee(self):
+        return (self.hourly_rate or 0) + (self.platform_fee or 0)
 
     # Extended profile fields
     bio = models.TextField(blank=True, help_text="Teacher's detailed biography")
@@ -123,6 +131,11 @@ class ClassSession(models.Model):
     # Google Meet link audit
     meet_link_added_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='added_meet_links')
     meet_link_updated_at = models.DateTimeField(null=True, blank=True)
+
+    # Automatic wallet payout tracking
+    is_wallet_credited = models.BooleanField(default=False, db_index=True)
+    wallet_credited_at = models.DateTimeField(null=True, blank=True)
+    wallet_transaction = models.ForeignKey('api.WalletTransaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='credited_sessions')
 
     created_at = models.DateTimeField(auto_now_add=True)
 

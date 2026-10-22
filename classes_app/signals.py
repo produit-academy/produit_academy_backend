@@ -34,3 +34,15 @@ def trigger_demo_emails(sender, instance, created, **kwargs):
                 )
             except Exception as e:
                 print(f"Error sending student demo link: {e}")
+
+
+@receiver(post_save, sender=ClassSession)
+def trigger_class_completion_wallet_credit(sender, instance, **kwargs):
+    if instance.status == 'Completed' and not instance.is_wallet_credited:
+        try:
+            from .services.wallet_service import credit_teacher_for_completed_session
+            credit_teacher_for_completed_session(instance.pk)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error crediting wallet for session #{instance.pk}: {e}")
+

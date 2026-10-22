@@ -237,12 +237,14 @@ class StaffWalletSerializer(serializers.ModelSerializer):
     staff_role = serializers.CharField(source='staff.role', read_only=True)
     role_display = serializers.SerializerMethodField()
     hourly_rate = serializers.SerializerMethodField()
+    platform_fee = serializers.SerializerMethodField()
+    total_fee = serializers.SerializerMethodField()
     phone_number = serializers.CharField(source='staff.phone_number', read_only=True, default='')
 
     class Meta:
         model = StaffWallet
         fields = ['id', 'staff', 'staff_email', 'staff_name', 'staff_role', 'role_display',
-                  'hourly_rate', 'phone_number',
+                  'hourly_rate', 'platform_fee', 'total_fee', 'phone_number',
                   'total_earned', 'total_paid', 'balance', 'transactions', 'updated_at']
 
     def get_staff_name(self, obj):
@@ -262,6 +264,23 @@ class StaffWalletSerializer(serializers.ModelSerializer):
         if obj.staff.role == 'teacher':
             try:
                 return str(obj.staff.classes_teacher_profile.hourly_rate)
+            except Exception:
+                return '0.00'
+        return None
+
+    def get_platform_fee(self, obj):
+        if obj.staff.role == 'teacher':
+            try:
+                return str(obj.staff.classes_teacher_profile.platform_fee)
+            except Exception:
+                return '0.00'
+        return None
+
+    def get_total_fee(self, obj):
+        if obj.staff.role == 'teacher':
+            try:
+                tp = obj.staff.classes_teacher_profile
+                return str((tp.hourly_rate or 0) + (tp.platform_fee or 0))
             except Exception:
                 return '0.00'
         return None

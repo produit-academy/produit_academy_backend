@@ -2212,6 +2212,21 @@ class CancelSessionView(APIView):
             if session.teacher != user and session.student != user:
                 return Response({'error': 'You are not authorized to cancel this session.'}, status=403)
 
+            # Check if scheduled time has already passed
+            if session.scheduled_time and session.scheduled_time <= timezone.now():
+                return Response({'error': 'Cannot cancel a session whose scheduled start time has already passed.'}, status=400)
+
+            # Enforce 12-hour notice for students
+            if session.student == user and not (user.is_staff or user.is_superuser):
+                if session.scheduled_time and timezone.now() > (session.scheduled_time - timedelta(hours=12)):
+                    return Response({
+                        'error': (
+                            'Under Produit Academy policy, sessions must be cancelled with at least '
+                            '12 hours advance notice. Please contact your teacher or support.'
+                        ),
+                        'code': 'NOTICE_LESS_THAN_12_HOURS'
+                    }, status=400)
+
             session.status = 'Cancelled'
             session.cancel_reason = reason
             session.cancelled_by = user

@@ -198,6 +198,10 @@ STORAGES = {
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# --- TIMEZONE CONFIGURATION ---
+TIME_ZONE = 'Asia/Kolkata'
+USE_TZ = True
+
 # --- RAZORPAY & PAYMENT SETTINGS ---
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')

@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from django.utils import timezone
 from rest_framework import serializers
 from api.models import User
@@ -457,15 +457,52 @@ class TeacherProfileDetailSerializer(serializers.ModelSerializer):
 
 class BookingScheduleSerializer(serializers.ModelSerializer):
     cancelled_by_name = serializers.SerializerMethodField()
+    is_past = serializers.SerializerMethodField()
+    is_within_12_hours = serializers.SerializerMethodField()
+    can_cancel_schedule = serializers.SerializerMethodField()
 
     class Meta:
         model = BookingSchedule
-        fields = ['id', 'date', 'start_time', 'end_time', 'status', 'cancel_reason', 'cancelled_by_name', 'cancelled_at']
+        fields = [
+            'id', 'date', 'start_time', 'end_time', 'status', 'cancel_reason',
+            'cancelled_by_name', 'cancelled_at',
+            'is_past', 'is_within_12_hours', 'can_cancel_schedule'
+        ]
+
+    def _get_schedule_dt(self, obj):
+        if not obj.date or not obj.start_time:
+            return None
+        dt = datetime.combine(obj.date, obj.start_time)
+        tz = timezone.get_current_timezone()
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, tz)
+        return dt
 
     def get_cancelled_by_name(self, obj):
         if obj.cancelled_by:
             return f"{obj.cancelled_by.first_name} {obj.cancelled_by.last_name}".strip() or obj.cancelled_by.username
         return None
+
+    def get_is_past(self, obj):
+        dt = self._get_schedule_dt(obj)
+        return bool(dt and timezone.now() >= dt)
+
+    def get_is_within_12_hours(self, obj):
+        dt = self._get_schedule_dt(obj)
+        if not dt:
+            return False
+        now = timezone.now()
+        cutoff = dt - timedelta(hours=12)
+        return cutoff <= now < dt
+
+    def get_can_cancel_schedule(self, obj):
+        if obj.status != 'scheduled':
+            return False
+        dt = self._get_schedule_dt(obj)
+        if not dt:
+            return False
+        # Student cannot cancel if within 12 hours or past
+        return timezone.now() < (dt - timedelta(hours=12))
 
 
 class BookingSerializer(serializers.ModelSerializer):
@@ -477,6 +514,11 @@ class BookingSerializer(serializers.ModelSerializer):
     subject_name = serializers.CharField(source='subject.name', read_only=True)
     course_name = serializers.CharField(source='course.name', read_only=True)
     schedules = BookingScheduleSerializer(many=True, read_only=True)
+    can_cancel_booking = serializers.SerializerMethodField()
+    cancellation_deadline = serializers.SerializerMethodField()
+    first_session_start = serializers.SerializerMethodField()
+    has_started = serializers.SerializerMethodField()
+    cancellation_policy_note = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -489,18 +531,95 @@ class BookingSerializer(serializers.ModelSerializer):
             'advance_amount', 'remaining_amount',
             'payment_status', 'booking_status', 'google_meet_link',
             'schedules', 'created_at',
+            'can_cancel_booking', 'cancellation_deadline', 'first_session_start',
+            'has_started', 'cancellation_policy_note',
         ]
         read_only_fields = [
             'student', 'teacher_fee_per_class', 'platform_fee',
             'total_amount', 'advance_amount', 'remaining_amount',
             'payment_status', 'booking_status', 'google_meet_link', 'created_at',
+            'can_cancel_booking', 'cancellation_deadline', 'first_session_start',
+            'has_started', 'cancellation_policy_note',
         ]
+
+    def _get_first_session_dt(self, obj):
+        cached = getattr(obj, '_cached_first_session_dt', None)
+        if isinstance(cached, datetime):
+            return cached
+
+        # Find earliest schedule (excluding cancelled ones)
+        schedules = [s for s in obj.schedules.all() if s.status != 'cancelled']
+        tz = timezone.get_current_timezone()
+        if schedules:
+            schedules.sort(key=lambda s: (s.date, s.start_time))
+            earliest = schedules[0]
+            dt = datetime.combine(earliest.date, earliest.start_time)
+            if timezone.is_naive(dt):
+                dt = timezone.make_aware(dt, tz)
+            obj._cached_first_session_dt = dt
+            return dt
+        elif obj.start_date and obj.preferred_time:
+            dt = datetime.combine(obj.start_date, obj.preferred_time)
+            if timezone.is_naive(dt):
+                dt = timezone.make_aware(dt, tz)
+            obj._cached_first_session_dt = dt
+            return dt
+
+        obj._cached_first_session_dt = None
+        return None
 
     def get_student_name(self, obj):
         return f"{obj.student.first_name} {obj.student.last_name}".strip() or obj.student.username
 
     def get_teacher_name(self, obj):
         return f"{obj.teacher.first_name} {obj.teacher.last_name}".strip() or obj.teacher.username
+
+    def get_first_session_start(self, obj):
+        dt = self._get_first_session_dt(obj)
+        return dt.isoformat() if dt else None
+
+    def get_cancellation_deadline(self, obj):
+        dt = self._get_first_session_dt(obj)
+        return dt.isoformat() if dt else None
+
+    def get_has_started(self, obj):
+        # Has any schedule been completed or in progress?
+        if any(s.status in ['completed', 'live'] for s in obj.schedules.all()):
+            return True
+        dt = self._get_first_session_dt(obj)
+        if dt and timezone.now() >= dt:
+            return True
+        return False
+
+    def get_can_cancel_booking(self, obj):
+        # Only pending or confirmed bookings can be cancelled
+        if obj.booking_status not in ['pending', 'confirmed']:
+            return False
+        # If any session is completed or if the first session has already started, cannot cancel for automated refund
+        if self.get_has_started(obj):
+            return False
+        return True
+
+    def get_cancellation_policy_note(self, obj):
+        if obj.booking_status == 'cancelled':
+            return "This booking has been cancelled."
+        if obj.booking_status == 'completed':
+            return "This course booking has been completed."
+
+        dt = self._get_first_session_dt(obj)
+        if not dt:
+            return "Eligible for 100% refund prior to commencement of the first scheduled class session."
+
+        now = timezone.now()
+        if now >= dt or any(s.status in ['completed', 'live'] for s in obj.schedules.all()):
+            return (
+                "Course sessions have already commenced. In accordance with Produit Academy Refund Policy, "
+                "automated 100% refunds are no longer available. For pro-rata or emergency evaluation, "
+                "please contact support."
+            )
+
+        date_str = dt.strftime('%A, %b %d, %Y at %I:%M %p')
+        return f"Eligible for 100% full refund before the first session starts on {date_str}."
 
 
 class TeacherBookingSerializer(serializers.ModelSerializer):

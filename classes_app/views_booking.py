@@ -4,7 +4,7 @@ New views for course browsing flow, teacher profiles, booking, and payment.
 import json
 import logging
 import razorpay
-from datetime import timedelta, date as dt_date
+from datetime import datetime, timedelta, date as dt_date
 from decimal import Decimal
 
 from django.utils import timezone
@@ -1041,6 +1041,32 @@ class CancelScheduleView(APIView):
         if schedule.status != 'scheduled':
             return Response({'error': f'Cannot cancel a class that is already {schedule.status}.'}, status=400)
 
+        # Check if the class scheduled time has already passed
+        tz = timezone.get_current_timezone()
+        schedule_dt = datetime.combine(schedule.date, schedule.start_time)
+        if timezone.is_naive(schedule_dt):
+            schedule_dt = timezone.make_aware(schedule_dt, tz)
+
+        now = timezone.now()
+        if schedule_dt <= now:
+            return Response({
+                'error': 'Cannot cancel a session whose scheduled start time has already passed.'
+            }, status=400)
+
+        # Enforce 12-hour advance notice policy for students (teachers & staff have emergency override)
+        is_student = user.id == booking.student_id
+        if is_student and not (user.is_staff or user.is_superuser):
+            notice_cutoff = schedule_dt - timedelta(hours=12)
+            if now > notice_cutoff:
+                return Response({
+                    'error': (
+                        'Under Produit Academy Refund Policy, individual class sessions must be cancelled '
+                        'with at least 12 hours advance notice prior to the session start time. '
+                        'Please contact your teacher or student support for emergency rescheduling.'
+                    ),
+                    'code': 'NOTICE_LESS_THAN_12_HOURS'
+                }, status=400)
+
         # Cancel the schedule
         schedule.status = 'cancelled'
         schedule.cancel_reason = reason
@@ -1129,6 +1155,52 @@ class StudentCancelBookingView(APIView):
 
         if booking.booking_status not in ['pending', 'confirmed']:
             return Response({'error': f'Cannot cancel a booking that is already {booking.booking_status}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Enforce Produit Academy Cancellation & Refund Policy:
+        # Full Cancellation Before First Session: If a booking is cancelled prior to the start
+        # of the first scheduled class session, a 100% refund of the booking amount will be issued.
+        is_admin = user.is_staff or user.is_superuser
+        if not is_admin:
+            # Check if any schedule has already been completed or is live
+            if booking.schedules.filter(status__in=['completed', 'live']).exists():
+                return Response({
+                    'error': (
+                        'Under Produit Academy Refund Policy, automated full refunds are not permitted once '
+                        'classes have commenced or been conducted. For pro-rata or emergency evaluation, '
+                        'please contact student support at produitacademy@gmail.com or +91 8139 805 996.'
+                    ),
+                    'code': 'COURSE_ALREADY_COMMENCED'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Determine first session start time
+            schedules = [s for s in booking.schedules.all() if s.status != 'cancelled']
+            tz = timezone.get_current_timezone()
+            first_session_dt = None
+            if schedules:
+                schedules.sort(key=lambda s: (s.date, s.start_time))
+                earliest = schedules[0]
+                dt = datetime.combine(earliest.date, earliest.start_time)
+                if timezone.is_naive(dt):
+                    dt = timezone.make_aware(dt, tz)
+                first_session_dt = dt
+            elif booking.start_date and booking.preferred_time:
+                dt = datetime.combine(booking.start_date, booking.preferred_time)
+                if timezone.is_naive(dt):
+                    dt = timezone.make_aware(dt, tz)
+                first_session_dt = dt
+
+            if first_session_dt and timezone.now() >= first_session_dt:
+                date_str = first_session_dt.strftime('%A, %b %d, %Y at %I:%M %p')
+                return Response({
+                    'error': (
+                        f'Under Produit Academy Refund Policy, automated cancellations and 100% refunds are '
+                        f'only permitted prior to the commencement of your first scheduled class session '
+                        f'(first session commenced on {date_str}). '
+                        f'Please contact student support at produitacademy@gmail.com or +91 8139 805 996 for assistance.'
+                    ),
+                    'code': 'CANCELLATION_DEADLINE_EXPIRED',
+                    'first_session_start': first_session_dt.isoformat()
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         refund_id = None
         refund_amount = float(booking.total_amount)

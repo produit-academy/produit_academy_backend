@@ -77,12 +77,6 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
     elif type == 'payment_confirmed':
         title = "Payment Confirmation - Produit Academy"
         intro = f"Thank you for your payment. Your booking has been successfully confirmed!"
-    elif type == 'demo_alert':
-        title = "Action Required: Demo Link Needed"
-        intro = f"You have a new Demo Class scheduled with {kwargs.get('student_name', 'a student')}. Please log in and provide a meeting link."
-    elif type == 'demo_link':
-        title = "Your Demo Class is Confirmed!"
-        intro = f"Your Demo Class with {kwargs.get('teacher_name', 'your teacher')} is scheduled."
 
     else: # resend
         title = "New OTP Request"
@@ -131,16 +125,6 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
                     <div class="otp-box">{otp}</div>
                     <p>This OTP will expire in 10 minutes for security reasons.</p>
                     <p>If you did not request this, please ignore this email or contact support.</p>
-        """
-    elif type == 'demo_link':
-        message_body = f"""
-                    <p>Hi <strong>{username}</strong>,</p>
-                    <p>{intro}</p>
-                    <p><strong>Time:</strong> {kwargs.get('time', 'TBA')}</p>
-                    <div style="text-align: center; margin: 30px 0;">
-                        <a href="{kwargs.get('link', '#')}" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Join Class</a>
-                    </div>
-                    <p>Please log in 5 minutes early.</p>
         """
     elif type in ['staff_credentials', 'user_credentials']:
         password = kwargs.get('password', '')

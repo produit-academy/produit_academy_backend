@@ -14,26 +14,6 @@ def cache_previous_link(sender, instance, **kwargs):
     else:
         instance._old_meeting_link = None
 
-@receiver(post_save, sender=ClassSession)
-def trigger_demo_emails(sender, instance, created, **kwargs):
-    if instance.is_demo and not created:
-        old_link = getattr(instance, '_old_meeting_link', None)
-        new_link = instance.meeting_link
-
-        if not old_link and new_link:
-            # The teacher just added the link. Send email to student.
-            try:
-                send_html_email(
-                    subject='Your Demo Class is Confirmed!',
-                    recipient_email=instance.student.email,
-                    username=instance.student.first_name or instance.student.email.split('@')[0],
-                    type='demo_link',
-                    time=instance.scheduled_time.strftime("%A, %b %d at %I:%M %p"),
-                    link=new_link,
-                    teacher_name=instance.teacher.first_name or 'Your Teacher'
-                )
-            except Exception as e:
-                print(f"Error sending student demo link: {e}")
 
 
 @receiver(post_save, sender=ClassSession)

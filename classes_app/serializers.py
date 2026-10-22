@@ -79,7 +79,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             'title', 'meeting_link', 'scheduled_time', 'duration_minutes',
             'status', 'effective_status', 'has_meet_link',
             'attendance_submitted', 'created_at',
-            'is_demo', 'student', 'student_name', 'teacher_notes',
+            'student', 'student_name', 'teacher_notes',
             'cancel_reason', 'cancelled_by', 'cancelled_by_name',
             'outcome_remarks', 'outcome_marked_by', 'outcome_marked_by_name', 'outcome_marked_at',
             'meet_link_added_by', 'meet_link_updated_at'

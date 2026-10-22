@@ -55,7 +55,7 @@ def credit_teacher_for_completed_session(session_id):
             if profile and profile.hourly_rate:
                 payout_amount = profile.hourly_rate
 
-        # If rate is 0 or negative (e.g., free demo), mark credited without transaction
+        # If rate is 0 or negative, mark credited without transaction
         if payout_amount <= Decimal('0.00'):
             session.is_wallet_credited = True
             session.wallet_credited_at = timezone.now()

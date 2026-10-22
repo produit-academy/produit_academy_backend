@@ -129,11 +129,6 @@ class StudentDashboardView(APIView):
             status__in=['Scheduled', 'Live', 'Needs Review']
         ).select_related('course', 'teacher').distinct().order_by('scheduled_time')[:15]
 
-        # Completed demos awaiting student acceptance
-        completed_demos = ClassSession.objects.filter(
-            student=user, is_demo=True, status='Completed', demo_outcome='Pending'
-        ).select_related('course', 'teacher').order_by('-scheduled_time')[:5]
-
         # Published reports for this student
         reports = ClassReport.objects.filter(
             student=user, status__in=['submitted', 'approved']
@@ -170,7 +165,7 @@ class StudentDashboardView(APIView):
 
         data = {
             'upcoming_classes': ClassSessionSerializer(upcoming, many=True).data,
-            'completed_demos': ClassSessionSerializer(completed_demos, many=True).data,
+            'completed_demos': [],
             'recent_reports': ClassReportSerializer(reports, many=True).data,
             'total_classes': total,
             'present_count': present,
@@ -1223,120 +1218,11 @@ class AdminUserAnalyticsView(APIView):
 
 
 # ============================================================
-# 1-TO-1 DEMO AND FLEXIBLE BOOKING
+# 1-TO-1 CLASS BOOKING
 # ============================================================
 
 from api.views import send_html_email
 from .models import TeacherProfile, TeacherAvailability
-
-class ScheduleDemoView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request):
-        if request.user.role not in ['admin']:
-            return Response({'error': 'Only admins can schedule demos.'}, status=403)
-        student_id = request.data.get('student_id')
-        teacher_id = request.data.get('teacher_id')
-        course_id = request.data.get('course_id')
-        scheduled_time = request.data.get('scheduled_time')
-
-        try:
-            student = User.objects.get(pk=student_id, role='student')
-            teacher = User.objects.get(pk=teacher_id, role='teacher')
-            course = Course.objects.get(pk=course_id)
-            if not _is_staff_approved(teacher):
-                return Response({'error': 'Teacher is not approved.'}, status=400)
-        except (User.DoesNotExist, Course.DoesNotExist):
-            return Response({'error': 'Invalid student, teacher, or course.'}, status=404)
-
-        # A teacher can have multiple students — no restriction here.
-        # But check for time conflict when actually booking (handled in BookSessionView).
-
-        demo = ClassSession.objects.create(
-            student=student,
-            teacher=teacher,
-            course=course,
-            title=f"Demo: {course.name}",
-            scheduled_time=scheduled_time,
-            duration_minutes=30,
-            is_demo=True,
-        )
-
-        try:
-            send_html_email(
-                subject='Action Required: Demo Link Needed',
-                recipient_email=teacher.email,
-                username=teacher.email.split('@')[0],
-                type='demo_alert',
-                student_name=student.first_name
-            )
-        except Exception:
-            pass
-
-        return Response({'message': 'Demo scheduled successfully.', 'demo_id': demo.id})
-
-
-class TeacherDemoLinkView(APIView):
-    permission_classes = [permissions.IsAuthenticated, IsTeacher]
-
-    def patch(self, request, pk):
-        link = request.data.get('meeting_link')
-        if not link:
-            return Response({'error': 'meeting_link is required'}, status=400)
-
-        try:
-            demo = ClassSession.objects.get(pk=pk, teacher=request.user, is_demo=True)
-            demo.meeting_link = link
-            demo.save() # Signal will trigger Brevo email
-            return Response({'message': 'Meeting link saved successfully.'})
-        except ClassSession.DoesNotExist:
-            return Response({'error': 'Demo not found'}, status=404)
-
-
-class AcceptDemoView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request, pk):
-        try:
-            demo = ClassSession.objects.get(pk=pk, student=request.user, is_demo=True)
-            if demo.status != 'Completed':
-                return Response({'error': 'Demo is not completed yet.'}, status=400)
-            
-            # Teacher can have multiple students across courses — no restriction here.
-
-            # Create enrollment
-            enrollment, created = Enrollment.objects.get_or_create(
-                student=request.user,
-                course=demo.course,
-                defaults={'teacher': demo.teacher}
-            )
-            
-            if not created and not enrollment.teacher:
-                enrollment.teacher = demo.teacher
-                enrollment.save()
-                
-            demo.demo_outcome = 'Approved'
-            demo.save()
-                
-            return Response({'message': 'Demo accepted and enrolled successfully.'})
-        except ClassSession.DoesNotExist:
-            return Response({'error': 'Demo not found'}, status=404)
-
-
-class RejectDemoView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request, pk):
-        try:
-            demo = ClassSession.objects.get(pk=pk, student=request.user, is_demo=True)
-            if demo.status != 'Completed':
-                return Response({'error': 'Demo is not completed yet.'}, status=400)
-            demo.demo_outcome = 'Rejected'
-            demo.save()
-            
-            return Response({'message': 'Demo rejected. Your admin will assign a new teacher soon.'})
-        except ClassSession.DoesNotExist:
-            return Response({'error': 'Demo not found'}, status=404)
 
 
 class BookSessionView(APIView):
@@ -1406,7 +1292,6 @@ class BookSessionView(APIView):
                 title=f"1-to-1 Class: {enrollment.course.name}",
                 scheduled_time=requested_dt,
                 duration_minutes=duration,
-                is_demo=False
             )
             return Response({'message': 'Session booked successfully.', 'session_id': session.id})
         except Enrollment.DoesNotExist:

@@ -1,6 +1,7 @@
 from django.shortcuts import get_object_or_404
 from django.http import FileResponse, Http404
 from django.utils import timezone
+from django.db import transaction
 from django.db.models import Q
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
@@ -64,20 +65,23 @@ class CourseRequestUpdateView(generics.UpdateAPIView):
             except Exception as e:
                 print(f"Failed to send approval email: {e}")
 
+def materials_visible_to(user):
+    """Study materials a user may list or open (shared by the list and file views)."""
+    if user.is_superuser or user.role in ['admin', 'manager'] or (hasattr(user, 'staff_profile') and user.staff_profile.has_module_access('gate_content')):
+        return StudyMaterial.objects.all()
+    if not user.branch:
+        return StudyMaterial.objects.none()
+    is_approved = CourseRequest.objects.filter(student=user, branch=user.branch, status='Approved').exists()
+    if is_approved:
+        return StudyMaterial.objects.filter(branch=user.branch)
+    return StudyMaterial.objects.filter(branch=user.branch, is_preview=True)
+
+
 class StudyMaterialView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = StudyMaterialSerializer
     def get_queryset(self):
-        user = self.request.user
-        if user.is_superuser or user.role in ['admin', 'manager'] or (hasattr(user, 'staff_profile') and user.staff_profile.has_module_access('gate_content')):
-            return StudyMaterial.objects.all()
-        if not user.branch:
-            return StudyMaterial.objects.none()
-        is_approved = CourseRequest.objects.filter(student=user, branch=user.branch, status='Approved').exists()
-        if is_approved:
-            return StudyMaterial.objects.filter(branch=user.branch)
-        else:
-            return StudyMaterial.objects.filter(branch=user.branch, is_preview=True)
+        return materials_visible_to(self.request.user)
 
 class HasGateContentAccess(permissions.BasePermission):
     """
@@ -102,10 +106,10 @@ class StudyMaterialUploadView(generics.CreateAPIView):
     serializer_class = StudyMaterialSerializer
 
 class MaterialFileView(APIView):
-    permission_classes = [permissions.AllowAny] 
+    permission_classes = [permissions.IsAuthenticated]
     def get(self, request, pk):
         try:
-            material = StudyMaterial.objects.get(pk=pk)
+            material = materials_visible_to(request.user).get(pk=pk)
             response = FileResponse(material.file.open(), content_type='application/pdf')
             response['Content-Disposition'] = f'inline; filename="{material.file.name}"'
             return response
@@ -316,81 +320,89 @@ class SubmitMockTestView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
-        mock_test = get_object_or_404(MockTest, pk=pk, student=request.user)
-
-        if mock_test.is_completed:
-            return Response({"error": "Test already submitted."}, status=status.HTTP_400_BAD_REQUEST)
-
         serializer = MockTestSubmitSerializer(data=request.data)
-        if serializer.is_valid():
-            total_score = 0.0
-            answers_map = {item['question_id']: item['answer'] for item in serializer.validated_data['answers']}
-            test_questions = MockTestQuestion.objects.filter(mock_test=mock_test).select_related('question')
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Lock the test row so a double-click / retry cannot score the same test twice
+        with transaction.atomic():
+            mock_test = get_object_or_404(MockTest.objects.select_for_update(), pk=pk, student=request.user)
+            if mock_test.is_completed:
+                return Response({"error": "Test already submitted."}, status=status.HTTP_400_BAD_REQUEST)
+            return self._score(mock_test, serializer)
+
+    def _score(self, mock_test, serializer):
+        total_score = 0.0
+        answers_map = {item['question_id']: item['answer'] for item in serializer.validated_data['answers']}
+        # Load every question's choices in one query instead of one query per answer
+        test_questions = MockTestQuestion.objects.filter(mock_test=mock_test).select_related('question').prefetch_related('question__choices')
+
+        for tq in test_questions:
+            question = tq.question
+            q_type = question.question_type
+            user_answer = answers_map.get(question.id)
+            question_choices = list(question.choices.all())
+
+            if user_answer is None:
+                continue # Not attempted
+
+            if q_type == 'MCQ':
+                try:
+                    answer_id = int(user_answer)
+                    selected_choice = next((c for c in question_choices if c.id == answer_id), None)
+                    if selected_choice is None:
+                        raise Choice.DoesNotExist
+                    tq.selected_choice = selected_choice
+                    
+                    if selected_choice.is_correct:
+                        tq.is_correct = True
+                        total_score += question.marks
+                    else:
+                        tq.is_correct = False
+                        total_score -= (question.marks / 3.0)
+                        
+                except (Choice.DoesNotExist, ValueError, TypeError):
+                    pass
+
+            elif q_type == 'MSQ':
+                if isinstance(user_answer, list):
+                    selected_ids = set(user_answer)
+                    correct_choice_ids = {c.id for c in question_choices if c.is_correct}
+
+                    choices_to_add = [c for c in question_choices if c.id in selected_ids]
+                    tq.selected_choices.set(choices_to_add)
+
+                    if selected_ids == correct_choice_ids:
+                        tq.is_correct = True
+                        total_score += question.marks
+                    else:
+                        tq.is_correct = False
+
+            elif q_type == 'NAT':
+                try:
+                    val = float(user_answer)
+                    tq.nat_answer = val
+                    if question.nat_min is not None and question.nat_max is not None:
+                        if question.nat_min <= val <= question.nat_max:
+                            tq.is_correct = True
+                            total_score += question.marks
+                        else:
+                            tq.is_correct = False
+                except (ValueError, TypeError):
+                    pass
             
-            for tq in test_questions:
-                question = tq.question
-                q_type = question.question_type
-                user_answer = answers_map.get(question.id)
+            tq.save()
 
-                if user_answer is None:
-                    continue # Not attempted
+        mock_test.score = round(total_score, 2)
+        mock_test.is_completed = True
+        mock_test.completed_at = timezone.now()
+        mock_test.save()
 
-                if q_type == 'MCQ':
-                    try:
-                        selected_choice = Choice.objects.get(id=user_answer, question=question)
-                        tq.selected_choice = selected_choice
-                        
-                        if selected_choice.is_correct:
-                            tq.is_correct = True
-                            total_score += question.marks
-                        else:
-                            tq.is_correct = False
-                            total_score -= (question.marks / 3.0)
-                            
-                    except (Choice.DoesNotExist, ValueError):
-                        pass
-
-                elif q_type == 'MSQ':
-                    if isinstance(user_answer, list):
-                        selected_ids = set(user_answer)
-                        correct_choice_ids = set(Choice.objects.filter(question=question, is_correct=True).values_list('id', flat=True))
-                        
-                        choices_to_add = Choice.objects.filter(id__in=selected_ids, question=question)
-                        tq.selected_choices.set(choices_to_add)
-
-                        if selected_ids == correct_choice_ids:
-                            tq.is_correct = True
-                            total_score += question.marks
-                        else:
-                            tq.is_correct = False
-
-                elif q_type == 'NAT':
-                    try:
-                        val = float(user_answer)
-                        tq.nat_answer = val
-                        if question.nat_min is not None and question.nat_max is not None:
-                            if question.nat_min <= val <= question.nat_max:
-                                tq.is_correct = True
-                                total_score += question.marks
-                            else:
-                                tq.is_correct = False
-                    except (ValueError, TypeError):
-                        pass
-                
-                tq.save()
-
-            mock_test.score = round(total_score, 2)
-            mock_test.is_completed = True
-            mock_test.completed_at = timezone.now()
-            mock_test.save()
-
-            return Response({
-                "message": "Test submitted successfully",
-                "score": mock_test.score,
-                "test_id": mock_test.id
-            }, status=status.HTTP_200_OK)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "message": "Test submitted successfully",
+            "score": mock_test.score,
+            "test_id": mock_test.id
+        }, status=status.HTTP_200_OK)
 
 class StudentMockTestHistoryView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]

@@ -9,6 +9,7 @@ from .views import (
     StudentListView, StudentManageView,
     StudentOTPRegisterView, StudentOTPLoginView, VerifyOTPAndLoginView,
 )
+from .chatbot import ChatbotTokenView, ChatbotProfileView, ChatbotProgressView
 
 urlpatterns = [
     # --- Auth & Core ---
@@ -33,4 +34,9 @@ urlpatterns = [
     path('student/register/', StudentOTPRegisterView.as_view(), name='student-otp-register'),
     path('student/otp-login/', StudentOTPLoginView.as_view(), name='student-otp-login'),
     path('student/verify-otp-login/', VerifyOTPAndLoginView.as_view(), name='student-verify-otp-login'),
+
+    # --- Learning-assistant chatbot ---
+    path('chatbot/token/', ChatbotTokenView.as_view(), name='chatbot-token'),
+    path('chatbot/profile/', ChatbotProfileView.as_view(), name='chatbot-profile'),
+    path('chatbot/progress/', ChatbotProgressView.as_view(), name='chatbot-progress'),
 ]

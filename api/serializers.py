@@ -17,7 +17,7 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         self.fields['password'] = serializers.CharField(write_only=True)
 
     @classmethod
-    def get_token(cls, user):
+    def get_token(cls, user, session_id=None):
         token = super().get_token(user)
         token['username'] = user.username
         token['first_name'] = user.first_name
@@ -36,6 +36,10 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
             or user.is_staff
             or hasattr(user, 'staff_profile')
         )
+        if user.role == 'student' and not user.is_staff and not user.is_superuser:
+            import uuid
+            sid = session_id or uuid.uuid4().hex
+            token['session_id'] = sid
         return token
 
     def validate(self, attrs):
@@ -73,7 +77,10 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
             raise AuthenticationFailed('Incorrect password. Please try again.')
 
         self.user = user
-        refresh = self.get_token(user)
+        import uuid
+        session_id = uuid.uuid4().hex if (user.role == 'student' and not user.is_staff and not user.is_superuser) else None
+        refresh = self.get_token(user, session_id=session_id)
+        self.session_id = session_id
 
         is_staff_user = (
             user.role in ['staff', 'manager', 'admin']

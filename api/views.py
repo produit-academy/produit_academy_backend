@@ -10,7 +10,7 @@ from django.core.cache import cache
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 
 from .models import User, Branch, CourseRequest, Session
@@ -334,13 +334,40 @@ class MyTokenObtainPairView(TokenObtainPairView):
         if user and user.role == 'student' and not user.is_staff and not user.is_superuser:
             try:
                 Session.objects.filter(user=user).delete()
-                session_key = serializer.validated_data.get('access')
+                session_key = getattr(serializer, 'session_id', None) or serializer.validated_data.get('access')
                 if session_key:
                     Session.objects.create(user=user, session_key=str(session_key))
+                    cache.set(f"user_active_session_{user.id}", str(session_key), timeout=300)
             except Exception:
                 pass
 
         return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """Refreshes JWT while ensuring single-session consistency for students."""
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            new_access = response.data.get('access')
+            if new_access:
+                try:
+                    from rest_framework_simplejwt.tokens import AccessToken
+                    access_obj = AccessToken(new_access)
+                    user_id = access_obj.get('user_id')
+                    token_session_id = access_obj.get('session_id')
+                    user = User.objects.filter(pk=user_id).first()
+                    if user and user.role == 'student' and not user.is_staff and not user.is_superuser:
+                        cache_key = f"user_active_session_{user.id}"
+                        active_key = token_session_id if token_session_id else str(new_access)
+                        Session.objects.update_or_create(
+                            user=user,
+                            defaults={'session_key': active_key}
+                        )
+                        cache.set(cache_key, active_key, timeout=300)
+                except Exception as e:
+                    logger.warning("Token refresh session sync error: %s", e)
+        return response
 
 class SignUpView(generics.CreateAPIView):
     queryset = User.objects.all()
@@ -878,15 +905,19 @@ class VerifyOTPAndLoginView(APIView):
         user.save()
 
         # Generate JWT tokens with custom claims
-        refresh = MyTokenObtainPairSerializer.get_token(user)
+        import uuid
+        session_id = uuid.uuid4().hex if (user.role == 'student' and not user.is_staff and not user.is_superuser) else None
+        refresh = MyTokenObtainPairSerializer.get_token(user, session_id=session_id)
         access_token_str = str(refresh.access_token)
 
         # Single Session Enforcement (STUDENTS ONLY)
-        try:
-            Session.objects.filter(user=user).delete()
-            Session.objects.create(user=user, session_key=access_token_str)
-        except Exception as e:
-            print(f"Session tracking notice: {e}")
+        if session_id:
+            try:
+                Session.objects.filter(user=user).delete()
+                Session.objects.create(user=user, session_key=session_id)
+                cache.set(f"user_active_session_{user.id}", session_id, timeout=300)
+            except Exception as e:
+                print(f"Session tracking notice: {e}")
 
         return Response({
             'message': 'Login successful!',

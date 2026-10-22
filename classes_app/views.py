@@ -2330,9 +2330,15 @@ class ClassesProfileView(APIView):
 
         user.save()
         
-        # Generate new token with updated claims (e.g. first_name)
+        # Generate new token with updated claims (e.g. first_name) while preserving active session
         from api.serializers import MyTokenObtainPairSerializer
-        refresh = MyTokenObtainPairSerializer.get_token(user)
+        from api.models import Session
+        from django.core.cache import cache
+        active_session = Session.objects.filter(user=user).order_by('-created_at').first()
+        existing_sid = str(active_session.session_key) if active_session else None
+        refresh = MyTokenObtainPairSerializer.get_token(user, session_id=existing_sid)
+        if existing_sid:
+            cache.set(f"user_active_session_{user.id}", existing_sid, timeout=300)
         
         return Response({
             'message': 'Profile updated successfully.',

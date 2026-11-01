@@ -11,6 +11,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.exceptions import PermissionDenied
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from api.validators import (
+    validate_uploaded_file, ALLOWED_DOCUMENT_EXTENSIONS, ALLOWED_AUDIO_EXTENSIONS,
+    MAX_DOCUMENT_SIZE_BYTES, MAX_AUDIO_SIZE_BYTES
+)
 
 from api.models import User
 from .models import (
@@ -1521,6 +1527,27 @@ class ClassReportListCreateView(APIView):
         if not (request.user.role == 'teacher' or request.user.is_staff or request.user.is_superuser):
             return Response({'error': 'Only teachers and admins can submit reports.'}, status=403)
 
+        # File validation
+        if 'pdf_report' in request.FILES:
+            try:
+                validate_uploaded_file(
+                    request.FILES['pdf_report'],
+                    allowed_extensions={'.pdf'},
+                    max_size_bytes=MAX_DOCUMENT_SIZE_BYTES
+                )
+            except DjangoValidationError as ve:
+                return Response({'error': list(ve.messages)}, status=400)
+
+        if 'voice_note' in request.FILES:
+            try:
+                validate_uploaded_file(
+                    request.FILES['voice_note'],
+                    allowed_extensions=ALLOWED_AUDIO_EXTENSIONS,
+                    max_size_bytes=MAX_AUDIO_SIZE_BYTES
+                )
+            except DjangoValidationError as ve:
+                return Response({'error': list(ve.messages)}, status=400)
+
         data = request.data.copy()
         serializer = ClassReportSerializer(data=data, context={'request': request})
         if serializer.is_valid():
@@ -1540,6 +1567,13 @@ class ClassReportDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ClassReportSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        if request.user.role == 'student' and request.method not in permissions.SAFE_METHODS:
+            raise PermissionDenied("Students are not permitted to modify or delete class reports.")
+        if request.user.role == 'teacher' and request.method == 'DELETE':
+            raise PermissionDenied("Teachers cannot delete submitted class reports.")
+
     def get_queryset(self):
         user = self.request.user
         if user.role == 'student':
@@ -1552,8 +1586,12 @@ class ClassReportDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         user = self.request.user
-        if user.is_staff or user.is_superuser or user.role == 'manager':
-            # Manager/Admin review action
+        if not (user.is_staff or user.is_superuser or user.role == 'manager'):
+            # Teachers cannot set status to approved or reviewed
+            new_status = self.request.data.get('status')
+            if new_status in ['reviewed', 'approved']:
+                raise PermissionDenied("Only administrators and managers can approve or review reports.")
+        else:
             new_status = self.request.data.get('status')
             if new_status in ['reviewed', 'approved']:
                 serializer.save(reviewed_by=user, reviewed_at=timezone.now())
@@ -1600,6 +1638,15 @@ class DailyVoiceNoteListCreateView(APIView):
 
         if not audio_file:
             return Response({'error': 'Audio recording or file is required.'}, status=400)
+
+        try:
+            validate_uploaded_file(
+                audio_file,
+                allowed_extensions=ALLOWED_AUDIO_EXTENSIONS,
+                max_size_bytes=MAX_AUDIO_SIZE_BYTES
+            )
+        except DjangoValidationError as ve:
+            return Response({'error': list(ve.messages)}, status=400)
 
         session = None
         student = None
@@ -1694,6 +1741,14 @@ class TeacherMonthlyReportListCreateView(APIView):
         ).count()
 
         if 'pdf_report_file' in request.FILES:
+            try:
+                validate_uploaded_file(
+                    request.FILES['pdf_report_file'],
+                    allowed_extensions={'.pdf'},
+                    max_size_bytes=MAX_DOCUMENT_SIZE_BYTES
+                )
+            except DjangoValidationError as ve:
+                return Response({'error': list(ve.messages)}, status=400)
             report.pdf_report_file = request.FILES['pdf_report_file']
 
         report.save()
@@ -1705,6 +1760,11 @@ class TeacherMonthlyReportDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = TeacherMonthlyReportSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        if request.user.role == 'teacher' and request.method == 'DELETE':
+            raise PermissionDenied("Teachers cannot delete submitted monthly reports.")
+
     def get_queryset(self):
         user = self.request.user
         if user.role == 'teacher':
@@ -1715,7 +1775,11 @@ class TeacherMonthlyReportDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         user = self.request.user
-        if user.is_staff or user.is_superuser or user.role == 'manager':
+        if not (user.is_staff or user.is_superuser or user.role == 'manager'):
+            new_status = self.request.data.get('status')
+            if new_status in ['reviewed', 'approved']:
+                raise PermissionDenied("Only administrators and managers can approve or review monthly reports.")
+        else:
             new_status = self.request.data.get('status')
             if new_status in ['reviewed', 'approved']:
                 serializer.save(reviewed_by=user, reviewed_at=timezone.now())
@@ -2256,8 +2320,10 @@ class ClassesChangePasswordView(APIView):
         if not user.check_password(current):
             return Response({'error': 'Current password is incorrect.'}, status=400)
 
-        if len(new_password) < 8:
-            return Response({'error': 'New password must be at least 8 characters.'}, status=400)
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as ve:
+            return Response({'error': list(ve.messages)}, status=400)
 
         user.set_password(new_password)
         user.save()

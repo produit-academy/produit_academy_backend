@@ -11,13 +11,31 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # --- SECURITY CONFIGURATION ---
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dev-key')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
-if not DEBUG and SECRET_KEY == 'django-insecure-dev-key':
-    import sys
-    print("WARNING: SECRET_KEY env var is not set - login tokens can be forged. "
-          "Set SECRET_KEY in the hosting environment.", file=sys.stderr)
+if not DEBUG and (SECRET_KEY == 'django-insecure-dev-key' or SECRET_KEY.startswith('django-insecure-')):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        "CRITICAL SECURITY ERROR: Running in production with an insecure or default SECRET_KEY. "
+        "Generate a strong random secret key and set it in your hosting environment."
+    )
 
-# Allow hosts from Render
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
+# Hosts configuration
+allowed_hosts_env = os.environ.get('ALLOWED_HOSTS')
+if allowed_hosts_env:
+    ALLOWED_HOSTS = [h.strip() for h in allowed_hosts_env.split(',') if h.strip()]
+elif DEBUG:
+    ALLOWED_HOSTS = ['*']
+else:
+    ALLOWED_HOSTS = [
+        'produitacademy.com',
+        '.produitacademy.com',
+        'api.produitacademy.com',
+        'gate.produitacademy.com',
+        'classes.produitacademy.com',
+        'staff.produitacademy.com',
+        'careers.produitacademy.com',
+        'localhost',
+        '127.0.0.1',
+    ]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -75,17 +93,26 @@ TEMPLATES = [
 WSGI_APPLICATION = 'produit_academy_backend.wsgi.application'
 
 # --- DATABASE (NEON / RENDER) WITH CONNECTION POOLING ---
-DATABASES = {
-    'default': dj_database_url.config(
-        default=os.environ.get('DATABASE_URL'),
-        conn_max_age=600,
-        conn_health_checks=True,
-        ssl_require=True
-    )
-}
-if 'OPTIONS' not in DATABASES['default']:
-    DATABASES['default']['OPTIONS'] = {}
-DATABASES['default']['OPTIONS']['connect_timeout'] = 10
+import sys
+if 'test' in sys.argv:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': ':memory:',
+        }
+    }
+else:
+    DATABASES = {
+        'default': dj_database_url.config(
+            default=os.environ.get('DATABASE_URL'),
+            conn_max_age=600,
+            conn_health_checks=True,
+            ssl_require=True
+        )
+    }
+    if 'OPTIONS' not in DATABASES['default']:
+        DATABASES['default']['OPTIONS'] = {}
+    DATABASES['default']['OPTIONS']['connect_timeout'] = 10
 
 # --- HIGH-PERFORMANCE IN-MEMORY CACHE ---
 CACHES = {
@@ -102,17 +129,37 @@ CACHES = {
 AUTH_USER_MODEL = 'api.User'
 
 # --- CORS & CSRF ---
-cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:3004')
+DEFAULT_ALLOWED_ORIGINS = [
+    'https://produitacademy.com',
+    'https://www.produitacademy.com',
+    'https://classes.produitacademy.com',
+    'https://gate.produitacademy.com',
+    'https://staff.produitacademy.com',
+    'https://careers.produitacademy.com',
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:3002',
+    'http://localhost:3003',
+    'http://localhost:3004',
+]
 
-if cors_env == '*':
+cors_env = os.environ.get('CORS_ALLOWED_ORIGINS')
+if cors_env and cors_env.strip() != '*':
+    parsed_origins = [o.strip() for o in cors_env.split(',') if o.strip()]
+    CORS_ALLOWED_ORIGINS = list(set(parsed_origins + DEFAULT_ALLOWED_ORIGINS))
+    CSRF_TRUSTED_ORIGINS = list(set(parsed_origins + DEFAULT_ALLOWED_ORIGINS))
+    CORS_ALLOW_ALL_ORIGINS = False
+elif DEBUG and cors_env == '*':
+    # Permitted only in local debug development
     CORS_ALLOW_ALL_ORIGINS = True
     CSRF_TRUSTED_ORIGINS = []
 else:
     CORS_ALLOW_ALL_ORIGINS = False
-    CORS_ALLOWED_ORIGINS = [o.strip() for o in cors_env.split(',') if o.strip()]
-    CSRF_TRUSTED_ORIGINS = [o.strip() for o in cors_env.split(',') if o.strip()]
+    CORS_ALLOWED_ORIGINS = DEFAULT_ALLOWED_ORIGINS
+    CSRF_TRUSTED_ORIGINS = DEFAULT_ALLOWED_ORIGINS
 
 CORS_ALLOW_CREDENTIALS = True
+
 # --- REST FRAMEWORK ---
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -124,7 +171,9 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/minute',
-        'user': '1000/minute'
+        'user': '1000/minute',
+        'auth': '10/minute',
+        'otp': '5/minute',
     }
 }
 
@@ -144,11 +193,13 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-# --- SECURITY HEADERS (production) ---
+# --- SECURITY HEADERS ---
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
+
 if not DEBUG:
-    SECURE_BROWSER_XSS_FILTER = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
-    X_FRAME_OPTIONS = 'DENY'
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'False') == 'True'
     SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'False') == 'True'

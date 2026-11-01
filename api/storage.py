@@ -8,6 +8,14 @@ from django.core.files.base import ContentFile
 from django.utils.deconstruct import deconstructible
 
 
+import logging
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+CLOUDINARY_ALLOWED_DOMAINS = {'res.cloudinary.com', 'cloudinary.com'}
+
+
 @deconstructible
 class CloudinaryMediaStorage(Storage):
     """
@@ -73,9 +81,18 @@ class CloudinaryMediaStorage(Storage):
     def _open(self, name, mode='rb'):
         target_url = self.url(name)
         if target_url.startswith('http://') or target_url.startswith('https://'):
-            res = requests.get(target_url, timeout=10)
-            if res.status_code == 200:
-                file_obj = ContentFile(res.content)
-                file_obj.name = os.path.basename(name)
-                return file_obj
+            parsed = urlparse(target_url)
+            host = (parsed.hostname or '').lower()
+            if not any(host == d or host.endswith('.' + d) for d in CLOUDINARY_ALLOWED_DOMAINS):
+                logger.warning("SSRF attempt blocked in CloudinaryMediaStorage._open: %s", target_url)
+                return None
+
+            try:
+                res = requests.get(target_url, timeout=10)
+                if res.status_code == 200:
+                    file_obj = ContentFile(res.content)
+                    file_obj.name = os.path.basename(name)
+                    return file_obj
+            except Exception as e:
+                logger.error("Error fetching file from Cloudinary: %s", e)
         return None

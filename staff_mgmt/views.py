@@ -4,6 +4,12 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, NotFound
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from api.validators import (
+    validate_uploaded_file, ALLOWED_DOCUMENT_EXTENSIONS, ALLOWED_IMAGE_EXTENSIONS,
+    MAX_DOCUMENT_SIZE_BYTES, MAX_IMAGE_SIZE_BYTES
+)
 from django.utils import timezone
 from django.db import models as db_models
 from api.models import (
@@ -669,11 +675,13 @@ class StaffChangePasswordView(APIView):
         if not user.check_password(current_password):
             return Response({'error': 'Current password is incorrect.'}, status=400)
 
-        if len(new_password) < 6:
-            return Response({'error': 'New password must be at least 6 characters long.'}, status=400)
-
         if confirm_password and new_password != confirm_password:
             return Response({'error': 'New passwords do not match.'}, status=400)
+
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as ve:
+            return Response({'error': list(ve.messages)}, status=400)
 
         user.set_password(new_password)
         user.save()
@@ -810,8 +818,25 @@ class StaffTaskSubmitCompletionView(APIView):
         task.status = 'submitted_for_review'
 
         if 'submission_file' in request.FILES:
+            try:
+                validate_uploaded_file(
+                    request.FILES['submission_file'],
+                    allowed_extensions=ALLOWED_DOCUMENT_EXTENSIONS,
+                    max_size_bytes=MAX_DOCUMENT_SIZE_BYTES
+                )
+            except DjangoValidationError as ve:
+                return Response({'error': list(ve.messages)}, status=400)
             task.submission_file = request.FILES['submission_file']
+
         if 'submission_image' in request.FILES:
+            try:
+                validate_uploaded_file(
+                    request.FILES['submission_image'],
+                    allowed_extensions=ALLOWED_IMAGE_EXTENSIONS,
+                    max_size_bytes=MAX_IMAGE_SIZE_BYTES
+                )
+            except DjangoValidationError as ve:
+                return Response({'error': list(ve.messages)}, status=400)
             task.submission_image = request.FILES['submission_image']
 
         task.save()

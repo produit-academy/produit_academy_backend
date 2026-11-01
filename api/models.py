@@ -13,8 +13,8 @@ class User(AbstractUser):
     ROLE_CHOICES = (('student', 'Student'), ('admin', 'Admin'), ('mentor', 'Mentor'), ('teacher', 'Teacher'), ('staff', 'Staff'), ('manager', 'Manager'))
     PLATFORM_CHOICES = (('gate', 'GATE'), ('classes', 'Classes'))
     email = models.EmailField(unique=True)
-    role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
-    platform = models.CharField(max_length=10, choices=PLATFORM_CHOICES, default='gate')
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student', db_index=True)
+    platform = models.CharField(max_length=10, choices=PLATFORM_CHOICES, default='gate', db_index=True)
     student_id = models.CharField(max_length=20, unique=True, null=True, blank=True)
     branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True)
     college = models.CharField(max_length=200, blank=True, null=True)
@@ -35,7 +35,7 @@ class User(AbstractUser):
         ('hold', 'On Hold'),
         ('banned', 'Banned'),
     )
-    account_status = models.CharField(max_length=20, choices=ACCOUNT_STATUS_CHOICES, default='active')
+    account_status = models.CharField(max_length=20, choices=ACCOUNT_STATUS_CHOICES, default='active', db_index=True)
     status_reason = models.TextField(blank=True, default='')
 
     USERNAME_FIELD = 'email'
@@ -61,7 +61,7 @@ class CourseRequest(models.Model):
     STATUS_CHOICES = (('Pending', 'Pending'), ('Approved', 'Approved'), ('Rejected', 'Rejected'))
     student = models.ForeignKey(User, on_delete=models.CASCADE)
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE)
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='Pending')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='Pending', db_index=True)
 
     def __str__(self): 
         return f"{self.student.username} - {self.branch.name} ({self.status})"
@@ -71,7 +71,7 @@ class CourseRequest(models.Model):
 class Session(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     session_key = models.TextField(primary_key=True) 
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
         return f"{self.user.username}'s active session"

@@ -108,9 +108,9 @@ class ClassSession(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='attended_sessions', null=True, blank=True, limit_choices_to={'role': 'student'})
     title = models.CharField(max_length=200)
     meeting_link = models.URLField(max_length=500, blank=True, null=True)
-    scheduled_time = models.DateTimeField()
+    scheduled_time = models.DateTimeField(db_index=True)
     duration_minutes = models.IntegerField(default=60)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Scheduled')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Scheduled', db_index=True)
     OUTCOME_CHOICES = [
         ('Pending', 'Pending'),
         ('Approved', 'Approved'),
@@ -235,8 +235,8 @@ class Booking(models.Model):
     advance_amount = models.DecimalField(max_digits=10, decimal_places=2)
     remaining_amount = models.DecimalField(max_digits=10, decimal_places=2)
 
-    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
-    booking_status = models.CharField(max_length=20, choices=BOOKING_STATUS_CHOICES, default='pending')
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending', db_index=True)
+    booking_status = models.CharField(max_length=20, choices=BOOKING_STATUS_CHOICES, default='pending', db_index=True)
     google_meet_link = models.URLField(max_length=500, blank=True)
 
     # Razorpay tracking
@@ -266,10 +266,10 @@ class BookingSchedule(models.Model):
     ]
 
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='schedules')
-    date = models.DateField()
+    date = models.DateField(db_index=True)
     start_time = models.TimeField()
     end_time = models.TimeField()
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled', db_index=True)
     cancel_reason = models.TextField(blank=True, default='')
     cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_schedules')
     cancelled_at = models.DateTimeField(null=True, blank=True)

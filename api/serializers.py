@@ -1,3 +1,6 @@
+from django.core.cache import cache
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
@@ -73,8 +76,23 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         if not user.has_usable_password():
             raise AuthenticationFailed('This account does not have a password set. Please use OTP login or complete your registration.')
 
+        # Check login failure lockout
+        fail_key = f"login_pwd_fail_{user.id}"
+        fails = cache.get(fail_key, 0)
+        if fails >= 5:
+            raise AuthenticationFailed('Too many failed login attempts. Your account has been temporarily locked for 15 minutes for security.')
+
         if not user.check_password(password):
-            raise AuthenticationFailed('Incorrect password. Please try again.')
+            new_fails = fails + 1
+            cache.set(fail_key, new_fails, timeout=900)
+            remaining = 5 - new_fails
+            if remaining > 0:
+                raise AuthenticationFailed(f'Incorrect password. {remaining} attempt(s) remaining before temporary lockout.')
+            else:
+                raise AuthenticationFailed('Too many failed login attempts. Your account has been temporarily locked for 15 minutes for security.')
+
+        # Clear login failure counter on successful authentication
+        cache.delete(fail_key)
 
         self.user = user
         import uuid
@@ -110,6 +128,14 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ('id', 'username', 'email', 'password', 'role', 'platform', 'student_id', 'branch', 'branch_name', 'college', 'phone_number', 'is_active', 'course_request_status', 'date_joined')
         extra_kwargs = {'password': {'write_only': True}}
     
+    def validate_password(self, value):
+        if value:
+            try:
+                validate_password(value)
+            except DjangoValidationError as ve:
+                raise serializers.ValidationError(list(ve.messages))
+        return value
+
     def get_course_request_status(self, obj):
         # Fetch the latest course request for this user
         req = CourseRequest.objects.filter(student=obj).last()
@@ -129,10 +155,20 @@ class SignUpSerializer(UserSerializer):
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=True)
     new_password = serializers.CharField(required=True)
+
     def validate_old_password(self, value):
         if not self.context['request'].user.check_password(value):
             raise serializers.ValidationError("Old password is not correct")
         return value
+
+    def validate_new_password(self, value):
+        user = self.context['request'].user
+        try:
+            validate_password(value, user=user)
+        except DjangoValidationError as ve:
+            raise serializers.ValidationError(list(ve.messages))
+        return value
+
     def update(self, instance, validated_data):
         instance.set_password(validated_data['new_password'])
         instance.save()

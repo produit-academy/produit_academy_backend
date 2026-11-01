@@ -7,17 +7,19 @@ import logging
 import random
 import secrets
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth.password_validation import validate_password
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-
 
 from .models import User, Branch, CourseRequest, Session
 from .serializers import (
     UserSerializer, SignUpSerializer, MyTokenObtainPairSerializer, BranchSerializer,
     ChangePasswordSerializer, UserProfileSerializer,
 )
+from .throttles import AuthRateThrottle, OTPRateThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +310,7 @@ def send_html_email(subject, recipient_email, username, otp=None, type='reset', 
 
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
+    throttle_classes = [AuthRateThrottle]
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -400,6 +403,7 @@ def _set_otp_cooldown(prefix, identifier):
 
 class VerifyOTPView(APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         email = (request.data.get('email') or '').strip().lower()
@@ -492,6 +496,7 @@ class VerifyAgreementView(APIView):
 
 class ResendOTPView(APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         email = (request.data.get('email') or '').strip().lower()
@@ -532,6 +537,7 @@ class ChangePasswordView(generics.UpdateAPIView):
 
 class PasswordResetRequestOTPView(APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         email = (request.data.get('email') or '').strip().lower()
@@ -545,8 +551,9 @@ class PasswordResetRequestOTPView(APIView):
 
         try:
             user = User.objects.filter(email__iexact=email).first()
+            # Anti-account-enumeration: If user does not exist, return generic success without revealing existence
             if not user:
-                return Response({'detail': 'User not found.'}, status=404)
+                return Response({'detail': 'If an account exists with this email, a password reset verification code has been sent.'})
 
             otp = _generate_otp()
             user.otp = otp
@@ -558,8 +565,9 @@ class PasswordResetRequestOTPView(APIView):
 
             try:
                 send_html_email('Password Reset Request', user.email, user.username, otp, type='reset')
-                return Response({'detail': 'Password reset verification code sent to your email.'})
+                return Response({'detail': 'If an account exists with this email, a password reset verification code has been sent.'})
             except Exception:
+                logger.error("Failed to send password reset email to %s", email)
                 return Response({'detail': 'Failed to send email. Please try again later.'}, status=500)
         except Exception:
             logger.exception("Password reset request failed")
@@ -568,6 +576,7 @@ class PasswordResetRequestOTPView(APIView):
 
 class PasswordResetConfirmView(APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         email = (request.data.get('email') or '').strip().lower()
@@ -576,9 +585,6 @@ class PasswordResetConfirmView(APIView):
 
         if not email or not otp or not password:
             return Response({'detail': 'Email, verification code, and new password are required.'}, status=400)
-
-        if len(password) < 8:
-            return Response({'detail': 'New password must be at least 8 characters long.'}, status=400)
 
         is_locked, _ = _check_otp_rate_limit("pwd_reset_fail", email)
         if is_locked:
@@ -589,7 +595,13 @@ class PasswordResetConfirmView(APIView):
         try:
             user = User.objects.filter(email__iexact=email).first()
             if not user:
-                return Response({'detail': 'User not found.'}, status=404)
+                return Response({'detail': 'Invalid or expired code.'}, status=400)
+
+            # Validate password complexity via Django password validators
+            try:
+                validate_password(password, user=user)
+            except DjangoValidationError as ve:
+                return Response({'detail': ve.messages}, status=400)
 
             if user.otp and user.otp == otp and user.otp_expiry and user.otp_expiry > timezone.now():
                 user.set_password(password)
@@ -665,6 +677,7 @@ class StudentOTPRegisterView(APIView):
     Creates unverified user directly in DB (no volatile in-memory cache), sends OTP email.
     """
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         full_name = request.data.get('full_name', '').strip()
@@ -694,8 +707,7 @@ class StudentOTPRegisterView(APIView):
                     existing_user.last_name = name_parts[1] if len(name_parts) > 1 else ''
                     existing_user.phone_number = phone_number
                     otp = _generate_otp()
-                    if settings.DEBUG:
-                        print(f"\n[DEBUG] Refreshed Registration OTP for {email}: {otp}\n")
+                    logger.info("Registration OTP refreshed for student registration")
                     existing_user.otp = otp
                     existing_user.otp_expiry = timezone.now() + timedelta(minutes=10)
                     existing_user.save()
@@ -722,8 +734,7 @@ class StudentOTPRegisterView(APIView):
         last_name = name_parts[1] if len(name_parts) > 1 else ''
 
         otp = _generate_otp()
-        if settings.DEBUG:
-            print(f"\n[DEBUG] Registration OTP for {email}: {otp}\n")
+        logger.info("Registration OTP generated for student registration")
 
         # Create user directly in the database (unverified)
         user = User.objects.create_user(
@@ -768,6 +779,7 @@ class StudentOTPLoginView(APIView):
     Blocks GATE platform users.
     """
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         email = request.data.get('email', '').strip().lower()
@@ -801,8 +813,7 @@ class StudentOTPLoginView(APIView):
                 return Response({'error': 'Please wait before requesting another OTP.'}, status=429)
 
         otp = _generate_otp()
-        if settings.DEBUG:
-            print(f"\n[DEBUG] Login OTP for {email}: {otp}\n")
+        logger.info("Login OTP generated for student login")
             
         user.otp = otp
         user.otp_expiry = timezone.now() + timedelta(minutes=10)
@@ -828,6 +839,7 @@ class VerifyOTPAndLoginView(APIView):
     POST: { email, otp }
     """
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         email = str(request.data.get('email') or '').strip().lower()

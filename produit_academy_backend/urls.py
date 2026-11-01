@@ -11,5 +11,9 @@ urlpatterns = [
     path('api/', include('support.urls')),        # Support System (complaints, contacts)
     path('api/classes/', include('classes_app.urls')),
     path('careers/', include('careers.urls')),
-    re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
 ]
+
+# Only serve media locally during local development; in production Cloudinary handles media
+if settings.DEBUG:
+    from django.conf.urls.static import static
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

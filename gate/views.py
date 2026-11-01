@@ -14,6 +14,9 @@ from api.models import (
     User, Branch, StudyMaterial, CourseRequest,
     Question, Choice, MockTest, MockTestQuestion
 )
+from api.validators import (
+    validate_uploaded_file, ALLOWED_STUDY_MATERIAL_EXTENSIONS, MAX_MATERIAL_SIZE_BYTES
+)
 from api.views import send_html_email
 from .serializers import (
     StudyMaterialSerializer, CourseRequestSerializer,
@@ -105,12 +108,25 @@ class StudyMaterialUploadView(generics.CreateAPIView):
     queryset = StudyMaterial.objects.all()
     serializer_class = StudyMaterialSerializer
 
+    def perform_create(self, serializer):
+        uploaded_file = self.request.FILES.get('file')
+        if uploaded_file:
+            validate_uploaded_file(
+                uploaded_file,
+                allowed_extensions=ALLOWED_STUDY_MATERIAL_EXTENSIONS,
+                max_size_bytes=MAX_MATERIAL_SIZE_BYTES
+            )
+        serializer.save()
+
 class MaterialFileView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request, pk):
         try:
             material = materials_visible_to(request.user).get(pk=pk)
-            response = FileResponse(material.file.open(), content_type='application/pdf')
+            opened = material.file.open()
+            if not opened:
+                raise Http404("File could not be opened.")
+            response = FileResponse(opened, content_type='application/pdf')
             response['Content-Disposition'] = f'inline; filename="{material.file.name}"'
             return response
         except StudyMaterial.DoesNotExist:

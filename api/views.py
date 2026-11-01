@@ -32,7 +32,9 @@ def _generate_otp():
 def _generate_student_id():
     """Unique PROD-XXXX id; widens to more digits only if the 4-digit space is crowded."""
     for digits in (4, 4, 4, 4, 4, 6, 6, 6, 8):
-        candidate = f"PROD-{random.randint(10 ** (digits - 1), 10 ** digits - 1)}"
+        range_min = 10 ** (digits - 1)
+        range_size = (10 ** digits) - range_min
+        candidate = f"PROD-{range_min + secrets.randbelow(range_size)}"
         if not User.objects.filter(student_id=candidate).exists():
             return candidate
     return f"PROD-{secrets.token_hex(6).upper()}"
@@ -359,6 +361,7 @@ class CustomTokenRefreshView(TokenRefreshView):
 class SignUpView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = SignUpSerializer
+    throttle_classes = [AuthRateThrottle]
 
     def perform_create(self, serializer):
         user = serializer.save()
@@ -451,6 +454,7 @@ class VerifyOTPView(APIView):
 
 class VerifyAgreementView(APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [OTPRateThrottle]
 
     def post(self, request):
         email = (request.data.get('email') or '').strip().lower()
@@ -609,6 +613,14 @@ class PasswordResetConfirmView(APIView):
                 user.otp_expiry = None
                 user.save(update_fields=['password', 'otp', 'otp_expiry'])
                 _clear_otp_rate_limit("pwd_reset_fail", email)
+
+                # Revoke active student sessions upon password reset
+                try:
+                    Session.objects.filter(user=user).delete()
+                    cache.delete(f"user_active_session_{user.id}")
+                except Exception as sess_e:
+                    logger.warning("Session revocation warning: %s", sess_e)
+
                 return Response({'detail': 'Password reset successfully. You may now log in with your new password.'})
 
             attempts = _record_otp_failure("pwd_reset_fail", email)

@@ -1,5 +1,6 @@
 # careers/views.py
 from rest_framework import generics, permissions
+from rest_framework.throttling import AnonRateThrottle
 from django.core.mail import send_mail
 from django.conf import settings
 from django.utils.html import escape
@@ -8,6 +9,7 @@ from .serializers import PublicJobApplicationSerializer
 
 class JobApplicationCreateView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [AnonRateThrottle]
     queryset = JobApplication.objects.all()
     serializer_class = PublicJobApplicationSerializer
 

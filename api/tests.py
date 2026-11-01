@@ -247,3 +247,101 @@ class SecurityHeadersMiddlewareTests(APITestCase):
         self.assertEqual(response.get("X-Frame-Options"), "DENY")
         self.assertEqual(response.get("Referrer-Policy"), "strict-origin-when-cross-origin")
         self.assertIn("camera=(self)", response.get("Permissions-Policy", ""))
+        self.assertIn("default-src 'self'", response.get("Content-Security-Policy", ""))
+
+
+class NewSecurityHardeningTests(APITestCase):
+    """Tests for newly hardened security features."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_csp_header_present(self):
+        response = self.client.get("/api/branches/")
+        self.assertIn("Content-Security-Policy", response)
+        self.assertIn("frame-ancestors 'none'", response["Content-Security-Policy"])
+
+    def test_session_revocation_on_password_reset(self):
+        from api.models import Session
+        from django.utils import timezone
+        from datetime import timedelta
+        user = User.objects.create_user(
+            username="reset_target@produit.com",
+            email="reset_target@produit.com",
+            password="InitialPass123!@",
+            role="student",
+            is_active=True,
+            is_verified=True,
+        )
+        user.otp = "123456"
+        user.otp_expiry = timezone.now() + timedelta(minutes=5)
+        user.save()
+
+        # Simulate active session
+        Session.objects.create(user=user, session_key="session_token_123")
+        cache.set(f"user_active_session_{user.id}", "session_token_123", timeout=300)
+
+        # Confirm password reset
+        response = self.client.post("/api/password-reset-confirm/", {
+            "email": user.email,
+            "otp": "123456",
+            "password": "NewStrongPass999#!"
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Session should be revoked
+        self.assertFalse(Session.objects.filter(user=user).exists())
+        self.assertIsNone(cache.get(f"user_active_session_{user.id}"))
+
+    def test_dummy_payment_blocked_when_disabled(self):
+        user = User.objects.create_user(
+            username="student_dummy@produit.com",
+            email="student_dummy@produit.com",
+            password="StrongPass123!#",
+            role="student",
+            platform="classes",
+            is_active=True,
+            is_verified=True,
+        )
+        self.client.force_authenticate(user=user)
+        with override_settings(ALLOW_DUMMY_PAYMENT=False):
+            response = self.client.post("/api/classes/student/pay/", {"booking_id": 9999})
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_teacher_profile_patch_validates_password(self):
+        teacher = User.objects.create_user(
+            username="teacher_val@produit.com",
+            email="teacher_val@produit.com",
+            password="StrongPass123!#",
+            role="teacher",
+            platform="classes",
+            is_active=True,
+            is_verified=True,
+        )
+        self.client.force_authenticate(user=teacher)
+        # Trivial password should fail
+        response = self.client.patch("/api/classes/teacher/manage-profile/", {
+            "password": "123"
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_teacher_profile_patch_validates_profile_picture_extension(self):
+        teacher = User.objects.create_user(
+            username="teacher_pic@produit.com",
+            email="teacher_pic@produit.com",
+            password="StrongPass123!#",
+            role="teacher",
+            platform="classes",
+            is_active=True,
+            is_verified=True,
+        )
+        self.client.force_authenticate(user=teacher)
+        bad_pic = SimpleUploadedFile("avatar.exe", b"fake binary", content_type="application/octet-stream")
+        response = self.client.patch("/api/classes/teacher/manage-profile/", {
+            "profile_picture": bad_pic
+        }, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_dateutil_dependency_available(self):
+        from dateutil.parser import parse
+        parsed_dt = parse("2026-11-01T10:00:00Z")
+        self.assertEqual(parsed_dt.year, 2026)

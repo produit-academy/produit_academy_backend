@@ -172,6 +172,13 @@ class ChangePasswordSerializer(serializers.Serializer):
     def update(self, instance, validated_data):
         instance.set_password(validated_data['new_password'])
         instance.save()
+        try:
+            from .models import Session
+            from django.core.cache import cache
+            Session.objects.filter(user=instance).delete()
+            cache.delete(f"user_active_session_{instance.id}")
+        except Exception:
+            pass
         return instance
 
 class UserProfileSerializer(serializers.ModelSerializer):

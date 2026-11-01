@@ -597,7 +597,8 @@ class CreateRazorpayOrderView(APIView):
 
             except Exception as e:
                 logger.error(f"Failed to create Razorpay order for booking {booking.id}: {e}", exc_info=True)
-                return Response({'error': f'Failed to create order: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                err_msg = f'Failed to create order: {str(e)}' if settings.DEBUG else 'Failed to create order with payment gateway. Please try again later.'
+                return Response({'error': err_msg}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class VerifyRazorpayPaymentView(APIView):
@@ -964,6 +965,10 @@ class TeacherProfileManageView(APIView):
         return Response(serializer.data)
 
     def patch(self, request):
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from api.validators import validate_uploaded_file, ALLOWED_IMAGE_EXTENSIONS, MAX_IMAGE_SIZE_BYTES
+
         profile, _ = TeacherProfile.objects.get_or_create(user=request.user)
         # Google Meet link is managed strictly by Classes Administration/HR, not by teachers
         allowed = ['bio', 'qualification', 'experience', 'skills', 'certifications',
@@ -971,8 +976,19 @@ class TeacherProfileManageView(APIView):
         for field in allowed:
             if field in request.data:
                 setattr(profile, field, request.data[field])
+
         if 'profile_picture' in request.FILES:
-            profile.profile_picture = request.FILES['profile_picture']
+            uploaded_pic = request.FILES['profile_picture']
+            try:
+                validate_uploaded_file(
+                    uploaded_pic,
+                    allowed_extensions=ALLOWED_IMAGE_EXTENSIONS,
+                    max_size_bytes=MAX_IMAGE_SIZE_BYTES
+                )
+            except DjangoValidationError as ve:
+                return Response({'error': list(ve.messages)}, status=status.HTTP_400_BAD_REQUEST)
+            profile.profile_picture = uploaded_pic
+
         profile.save()
 
         user = request.user
@@ -984,8 +1000,14 @@ class TeacherProfileManageView(APIView):
             user.last_name = request.data['last_name']
             user_updated = True
         if 'password' in request.data and request.data['password']:
-            user.set_password(request.data['password'])
-            user_updated = True
+            pwd = str(request.data['password']).strip()
+            if pwd:
+                try:
+                    validate_password(pwd, user=user)
+                except DjangoValidationError as ve:
+                    return Response({'error': list(ve.messages)}, status=status.HTTP_400_BAD_REQUEST)
+                user.set_password(pwd)
+                user_updated = True
         if user_updated:
             user.save()
 
@@ -1252,9 +1274,8 @@ class StudentCancelBookingView(APIView):
                 )
             except Exception as e:
                 logger.error(f"Razorpay refund failed for booking {booking.id}: {e}", exc_info=True)
-                return Response({
-                    'error': f'Failed to process refund through payment gateway: {str(e)}. Please contact support.'
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                err_msg = f'Failed to process refund through payment gateway: {str(e)}. Please contact support.' if settings.DEBUG else 'Failed to process refund through payment gateway. The error has been logged for admin review.'
+                return Response({'error': err_msg}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Update booking status
         booking.booking_status = 'cancelled'

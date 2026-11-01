@@ -35,10 +35,14 @@ class AdminComplaintListView(generics.ListAPIView):
     queryset = Complaint.objects.all().order_by('-created_at')
 
 
+from rest_framework.throttling import AnonRateThrottle
+
+
 # --- CONTACT INQUIRY VIEWS ---
 
 class ContactInquiryView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [AnonRateThrottle]
     queryset = ContactInquiry.objects.all()
     serializer_class = ContactInquirySerializer
 

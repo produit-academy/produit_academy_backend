@@ -124,6 +124,12 @@ class MockTest(models.Model):
     score = models.FloatField(default=0.0)
     is_completed = models.BooleanField(default=False)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['student', '-created_at']),
+            models.Index(fields=['student', 'is_completed']),
+        ]
+
     def __str__(self): 
         return f"Test {self.id} - {self.student.username}"
 

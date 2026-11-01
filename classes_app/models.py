@@ -277,6 +277,9 @@ class BookingSchedule(models.Model):
 
     class Meta:
         ordering = ['date', 'start_time']
+        indexes = [
+            models.Index(fields=['status', 'date', 'start_time']),
+        ]
 
     def __str__(self):
         return f"Schedule: {self.booking} on {self.date}"

@@ -22,6 +22,7 @@ from gate.models import MockTest, Question, StudyMaterial, CourseRequest
 from careers.models import JobApplication
 from api.views import send_html_email
 import random
+import secrets
 import string
 import re
 from decimal import Decimal
@@ -133,7 +134,7 @@ class SuperAdminUserCreateView(APIView):
             }, status=400)
 
         # Auto-generate random secure password if not explicitly supplied
-        raw_password = password.strip() if password and str(password).strip() else ('PA-' + ''.join(random.choices(string.ascii_letters + string.digits, k=10)))
+        raw_password = password.strip() if password and str(password).strip() else ('PA-' + ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(10)))
 
         valid_types = ['platform_admin', 'support_staff', 'contact_staff', 'hr_staff', 'manager', 'custom_staff']
         if account_type not in valid_types:
@@ -473,7 +474,7 @@ class OnboardStaffView(APIView):
         if User.objects.filter(email=email).exists():
             return Response({'error': 'User already exists.'}, status=400)
 
-        otp = str(random.randint(100000, 999999))
+        otp = str(secrets.randbelow(900000) + 100000)
         user = User.objects.create_user(
             username=email, email=email,
             first_name=first_name,
@@ -583,8 +584,8 @@ class ApproveStaffView(APIView):
             user = User.objects.get(id=user_id, role__in=['teacher'])
             is_newly_verified = False
             if not user.is_verified:
-                # Generate random password
-                raw_password = 'PA-' + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                # Generate random password with cryptographic randomness
+                raw_password = 'PA-' + ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
                 user.set_password(raw_password)
                 user.is_verified = True
                 user.save()

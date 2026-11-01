@@ -24,6 +24,9 @@ class ClearHSTSMiddleware:
         if 'Permissions-Policy' not in response:
             response['Permissions-Policy'] = 'camera=(self), microphone=(self), geolocation=()'
 
+        if 'Content-Security-Policy' not in response:
+            response['Content-Security-Policy'] = "default-src 'self' https: data: blob: 'unsafe-inline'; frame-ancestors 'none';"
+
         # HSTS handling: clear on local debug, enforce in production over HTTPS
         if getattr(settings, 'DEBUG', False):
             response['Strict-Transport-Security'] = 'max-age=0'

@@ -129,19 +129,28 @@ CACHES = {
 AUTH_USER_MODEL = 'api.User'
 
 # --- CORS & CSRF ---
-DEFAULT_ALLOWED_ORIGINS = [
+# --- CORS & CSRF ---
+PROD_ALLOWED_ORIGINS = [
     'https://produitacademy.com',
     'https://www.produitacademy.com',
     'https://classes.produitacademy.com',
     'https://gate.produitacademy.com',
     'https://staff.produitacademy.com',
     'https://careers.produitacademy.com',
+]
+DEV_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:3002',
     'http://localhost:3003',
     'http://localhost:3004',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
+    'http://127.0.0.1:3002',
+    'http://127.0.0.1:3003',
+    'http://127.0.0.1:3004',
 ]
+DEFAULT_ALLOWED_ORIGINS = PROD_ALLOWED_ORIGINS + (DEV_ALLOWED_ORIGINS if DEBUG else [])
 
 cors_env = os.environ.get('CORS_ALLOWED_ORIGINS')
 if cors_env and cors_env.strip() != '*':
@@ -178,7 +187,7 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=7),
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
@@ -202,11 +211,11 @@ SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'False') == 'True'
-    SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'False') == 'True'
-    CSRF_COOKIE_SECURE = os.environ.get('CSRF_COOKIE_SECURE', 'False') == 'True'
-    SECURE_HSTS_SECONDS = 31536000 if os.environ.get('SECURE_SSL_REDIRECT') == 'True' else 0
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = os.environ.get('SECURE_SSL_REDIRECT') == 'True'
-    SECURE_HSTS_PRELOAD = os.environ.get('SECURE_SSL_REDIRECT') == 'True'
+    SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'True') == 'True'
+    CSRF_COOKIE_SECURE = os.environ.get('CSRF_COOKIE_SECURE', 'True') == 'True'
+    SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = os.environ.get('SECURE_HSTS_INCLUDE_SUBDOMAINS', 'True') == 'True'
+    SECURE_HSTS_PRELOAD = os.environ.get('SECURE_HSTS_PRELOAD', 'True') == 'True'
 
 # --- EMAIL SETTINGS ---
 EMAIL_BACKEND = "anymail.backends.sendinblue.EmailBackend"
@@ -258,9 +267,71 @@ USE_TZ = True
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
 RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
-ALLOW_DUMMY_PAYMENT = os.environ.get('ALLOW_DUMMY_PAYMENT', 'False').strip().lower() == 'true'
+# Production safety: dummy payments are strictly disabled in production
+ALLOW_DUMMY_PAYMENT = (os.environ.get('ALLOW_DUMMY_PAYMENT', 'False').strip().lower() == 'true') and DEBUG
+
 # --- CHATBOT INTEGRATION (optional: endpoints stay disabled until both are set) ---
 # CHATBOT_JWT_SECRET must equal SHARED_JWT_SECRET on the chatbot server.
 # CHATBOT_SERVICE_KEY must equal MAIN_SITE_API_KEY on the chatbot server.
 CHATBOT_JWT_SECRET = os.environ.get('CHATBOT_JWT_SECRET', '')
 CHATBOT_SERVICE_KEY = os.environ.get('CHATBOT_SERVICE_KEY', '')
+
+# --- LOGGING CONFIGURATION ---
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'api': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'classes_app': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'staff_mgmt': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'gate': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'support': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'careers': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+

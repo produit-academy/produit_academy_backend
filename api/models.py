@@ -297,6 +297,13 @@ class StaffTask(models.Model):
     payment_notes = models.TextField(blank=True, null=True)
     paid_at = models.DateTimeField(null=True, blank=True)
 
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'payment_status']),
+            models.Index(fields=['assigned_to', '-created_at']),
+        ]
+
     def __str__(self):
         return f"{self.title} → {self.assigned_to.email} [{self.status} / {self.payment_status}]"
 

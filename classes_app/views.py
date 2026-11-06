@@ -1662,9 +1662,17 @@ class DailyVoiceNoteListCreateView(APIView):
 
         if not student and request.data.get('student'):
             try:
-                student = User.objects.get(pk=request.data.get('student'), role='student')
+                candidate = User.objects.get(pk=request.data.get('student'), role='student')
+                if not is_classes_staff_or_admin(request.user):
+                    has_relation = (
+                        Booking.objects.filter(teacher=request.user, student=candidate).exists() or
+                        ClassSession.objects.filter(teacher=request.user, student=candidate).exists()
+                    )
+                    if not has_relation:
+                        return Response({'error': 'You can only upload voice notes for students enrolled or booked with you.'}, status=403)
+                student = candidate
             except User.DoesNotExist:
-                pass
+                return Response({'error': 'Student not found.'}, status=404)
 
         note = DailyClassVoiceNote.objects.create(
             class_session=session,

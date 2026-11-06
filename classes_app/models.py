@@ -249,6 +249,11 @@ class Booking(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['booking_status', 'payment_status']),
+            models.Index(fields=['teacher', 'booking_status']),
+            models.Index(fields=['student', 'booking_status']),
+        ]
 
     def __str__(self):
         return f"Booking: {self.student.username} → {self.teacher.username} ({self.subject.name})"

@@ -345,3 +345,58 @@ class NewSecurityHardeningTests(APITestCase):
         from dateutil.parser import parse
         parsed_dt = parse("2026-11-01T10:00:00Z")
         self.assertEqual(parsed_dt.year, 2026)
+
+    def test_voice_note_idor_prevention_for_unrelated_student(self):
+        """Teachers cannot upload voice notes targeting students not enrolled with them."""
+        teacher = User.objects.create_user(
+            username="teacher_vn@produit.com",
+            email="teacher_vn@produit.com",
+            password="StrongPass123!#",
+            role="teacher",
+            platform="classes",
+            is_active=True,
+            is_verified=True,
+        )
+        unrelated_student = User.objects.create_user(
+            username="student_unrelated@produit.com",
+            email="student_unrelated@produit.com",
+            password="StrongPass123!#",
+            role="student",
+            platform="classes",
+            is_active=True,
+            is_verified=True,
+        )
+        self.client.force_authenticate(user=teacher)
+        audio = SimpleUploadedFile("voice.mp3", b"ID3 fake audio data", content_type="audio/mpeg")
+        response = self.client.post("/api/classes/voice-notes/", {
+            "student": unrelated_student.id,
+            "audio_file": audio,
+            "text_summary": "Test Note"
+        }, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_voice_note_rejects_disallowed_file_type(self):
+        """Malicious executable or script files cannot be uploaded as voice notes."""
+        teacher = User.objects.create_user(
+            username="teacher_file_test@produit.com",
+            email="teacher_file_test@produit.com",
+            password="StrongPass123!#",
+            role="teacher",
+            platform="classes",
+            is_active=True,
+            is_verified=True,
+        )
+        self.client.force_authenticate(user=teacher)
+        bad_file = SimpleUploadedFile("malware.php", b"<?php phpinfo(); ?>", content_type="application/x-php")
+        response = self.client.post("/api/classes/voice-notes/", {
+            "audio_file": bad_file,
+            "text_summary": "Test Note"
+        }, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unauthenticated_request_denied_by_default(self):
+        """Unauthenticated requests to protected endpoints return 401 Unauthorized."""
+        self.client.force_authenticate(user=None)
+        response = self.client.get("/api/profile/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+

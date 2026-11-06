@@ -1355,20 +1355,70 @@ class ManagerTaskPostpaidPaymentView(APIView):
         if task.assigned_to == request.user and not request.user.is_superuser:
             return Response({'error': 'Assignees cannot assign or approve their own payment.'}, status=403)
 
-        action = request.data.get('action') # 'assign_amount' or 'approve_payment'
+        action = request.data.get('action') # 'assign_amount', 'approve_payment', or 'reset_payment'
         amount_str = request.data.get('amount')
         notes = request.data.get('notes', '').strip()
 
         old_amount = task.payment_amount
         old_status = task.payment_status
 
-        if action == 'assign_amount':
+        if action in ['reset_payment', 'reset_amount', 'remove_amount']:
+            if task.payment_status == 'paid':
+                return Response({'error': 'Cannot reset amount for a task that has already been paid.'}, status=400)
+
+            task.payment_amount = Decimal('0.00')
+            task.payment_status = 'not_assigned'
+            task.payment_assigned_by = None
+            task.payment_assigned_at = None
+            task.payment_approved_by = None
+            task.payment_approved_at = None
+            task.paid_at = None
+            if notes:
+                task.payment_notes = notes
+            else:
+                task.payment_notes = ''
+            task.save()
+
+            TaskPaymentAuditLog.objects.create(
+                task=task, changed_by=request.user,
+                old_amount=old_amount, new_amount=Decimal('0.00'),
+                old_status=old_status, new_status='not_assigned',
+                reason=notes or 'Payment amount removed and reset by manager'
+            )
+            return Response({'message': 'Payment amount removed and reset.', 'task': StaffTaskSerializer(task).data})
+
+        elif action == 'assign_amount':
             try:
                 amount = Decimal(str(amount_str))
                 if amount < 0:
                     raise ValueError()
             except Exception:
                 return Response({'error': 'Valid payment amount is required.'}, status=400)
+
+            if amount == Decimal('0.00'):
+                if task.payment_status == 'paid':
+                    return Response({'error': 'Cannot reset amount for a task that has already been paid.'}, status=400)
+
+                task.payment_amount = Decimal('0.00')
+                task.payment_status = 'not_assigned'
+                task.payment_assigned_by = None
+                task.payment_assigned_at = None
+                task.payment_approved_by = None
+                task.payment_approved_at = None
+                task.paid_at = None
+                if notes:
+                    task.payment_notes = notes
+                else:
+                    task.payment_notes = ''
+                task.save()
+
+                TaskPaymentAuditLog.objects.create(
+                    task=task, changed_by=request.user,
+                    old_amount=old_amount, new_amount=Decimal('0.00'),
+                    old_status=old_status, new_status='not_assigned',
+                    reason=notes or 'Payment amount removed and reset to 0 by manager'
+                )
+                return Response({'message': 'Payment amount removed and reset to 0.', 'task': StaffTaskSerializer(task).data})
 
             task.payment_amount = amount
             task.payment_status = 'amount_assigned'
@@ -1403,7 +1453,7 @@ class ManagerTaskPostpaidPaymentView(APIView):
             )
             return Response({'message': f'Payment of ₹{task.payment_amount} approved.', 'task': StaffTaskSerializer(task).data})
 
-        return Response({'error': 'Invalid action. Choose assign_amount or approve_payment.'}, status=400)
+        return Response({'error': 'Invalid action. Choose assign_amount, approve_payment, or reset_payment.'}, status=400)
 
 
 class MarkTaskPaidView(APIView):
